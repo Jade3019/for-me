@@ -242,7 +242,7 @@ class AppealModal(discord.ui.Modal, title="Ban appeal"):
             embed.add_field(name="Banned for", value=f"{fmt_seconds(int(time.time()) - record['ts'])} (since <t:{record['ts']}:f>)", inline=False)
         embed.add_field(name="Appeal", value=clip(self.reason.value), inline=False)
         embed.set_footer(text=f"User ID: {interaction.user.id}")
-        await channel.send(embed=embed)
+        await channel.send(embed=embed, view=AppealReviewView())
         await interaction.response.send_message("✅ Your appeal has been sent to the staff team.")
 
 
@@ -261,6 +261,49 @@ class AppealView(discord.ui.View):
         traceback.print_exception(error)
         if not interaction.response.is_done():
             await interaction.response.send_message("❌ Something went wrong, please contact a staff member.")
+
+
+class AppealReviewView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def handle(self, interaction, approved):
+        if not interaction.user.guild_permissions.ban_members:
+            await interaction.response.send_message("❌ You need the Ban Members permission.", ephemeral=True)
+            return
+        old = interaction.message.embeds[0]
+        m = re.search(r"User ID: (\d+)", old.footer.text or "")
+        if not m:
+            await interaction.response.send_message("❌ Couldn't find the user in this appeal.", ephemeral=True)
+            return
+        uid = int(m.group(1))
+        user = await client.fetch_user(uid)
+        if approved:
+            try:
+                await interaction.guild.unban(user, reason=f"Appeal approved by {interaction.user}")
+            except discord.NotFound:
+                pass
+            except discord.Forbidden:
+                await interaction.response.send_message("❌ I can't unban that user (missing Ban Members).", ephemeral=True)
+                return
+        else:
+            dm = discord.Embed(title="Appeal declined", color=discord.Color.red(),
+                               description=f"Your ban appeal for {interaction.guild.name} has been declined.")
+            await dm_user(user, dm)
+        embed = old.copy()
+        embed.color = discord.Color.green() if approved else discord.Color.red()
+        embed.add_field(name="Result", value=f"{'Approved' if approved else 'Declined'} by {interaction.user.mention}", inline=False)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Approved", style=discord.ButtonStyle.success, custom_id="appeal_approve")
+    async def approve(self, interaction, button):
+        await self.handle(interaction, True)
+
+    @discord.ui.button(label="Declined", style=discord.ButtonStyle.danger, custom_id="appeal_decline")
+    async def decline(self, interaction, button):
+        await self.handle(interaction, False)
 
 
 async def unmute_loop():
@@ -287,6 +330,7 @@ async def unmute_loop():
 
 async def setup():
     client.add_view(AppealView())
+    client.add_view(AppealReviewView())
     asyncio.create_task(unmute_loop())
 
 
