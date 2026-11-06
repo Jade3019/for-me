@@ -80,6 +80,7 @@ async def on_message(message):
             return
         stickies[target.id] = {"text": text, "last_id": None}
         await repost_sticky(target)
+        await message.channel.send(f"✅ Sticky message set in {target.mention}!")
         return
 
     if message.channel.id in stickies:
