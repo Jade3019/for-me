@@ -329,6 +329,7 @@ async def unmute_loop():
 
 
 async def setup():
+    print("setup_hook: registering appeal views")
     client.add_view(AppealView())
     client.add_view(AppealReviewView())
     asyncio.create_task(unmute_loop())
@@ -466,6 +467,11 @@ async def run_mod_command(message, name, args):
     infractions["bans"].append({**base, "reason": reason})
     save_infractions()
     await message.channel.send(f"✅ Banned <@{uid}>." + ("" if sent else " (Couldn't DM them.)"))
+
+
+@client.event
+async def on_interaction(interaction):
+    print(f"interaction: type={interaction.type.name} data={interaction.data}")
 
 
 @client.event
