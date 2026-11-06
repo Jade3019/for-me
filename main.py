@@ -277,25 +277,39 @@ class AppealReviewView(discord.ui.View):
             await interaction.response.send_message("❌ Couldn't find the user in this appeal.", ephemeral=True)
             return
         uid = int(m.group(1))
-        user = await client.fetch_user(uid)
+        await interaction.response.defer()
+        try:
+            user = await client.fetch_user(uid)
+        except discord.HTTPException:
+            await interaction.followup.send("❌ Couldn't find the user. Please try again.", ephemeral=True)
+            return
         if approved:
             try:
                 await interaction.guild.unban(user, reason=f"Appeal approved by {interaction.user}")
             except discord.NotFound:
                 pass
             except discord.Forbidden:
-                await interaction.response.send_message("❌ I can't unban that user (missing Ban Members).", ephemeral=True)
+                await interaction.followup.send("❌ I can't unban that user (missing Ban Members).", ephemeral=True)
                 return
-        else:
-            dm = discord.Embed(title="Appeal declined", color=discord.Color.red(),
-                               description=f"Your ban appeal for {interaction.guild.name} has been declined.")
-            await dm_user(user, dm)
+            except discord.HTTPException:
+                await interaction.followup.send("❌ Couldn't unban that user. Please try again.", ephemeral=True)
+                return
+        result = "approved" if approved else "declined"
+        dm = discord.Embed(title=f"Appeal {result}",
+                           color=discord.Color.green() if approved else discord.Color.red(),
+                           description=f"Your ban appeal for {interaction.guild.name} has been {result}.")
+        sent = await dm_user(user, dm)
         embed = old.copy()
         embed.color = discord.Color.green() if approved else discord.Color.red()
         embed.add_field(name="Result", value=f"{'Approved' if approved else 'Declined'} by {interaction.user.mention}", inline=False)
-        for child in self.children:
+        disabled_view = AppealReviewView()
+        for child in disabled_view.children:
             child.disabled = True
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.edit_original_response(embed=embed, view=disabled_view)
+        if not sent:
+            await interaction.followup.send(
+                f"⚠️ Appeal {result}, but I couldn't DM the user.", ephemeral=True
+            )
 
     @discord.ui.button(label="Approved", style=discord.ButtonStyle.success, custom_id="appeal_approve")
     async def approve(self, interaction, button):
