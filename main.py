@@ -15,7 +15,6 @@ LOG_FILE = "logchannels.json"
 INFRACTION_FILE = "infractions.json"
 MUTE_ROLE_ID = 1558947443444555958
 APPEAL_CHANNEL_ID = 1568339091702026300
-IGNORED_LOG_BOTS = {716390085896962058, 1543313914740084768}
 LOG_COMMANDS = {"memberlog": "member", "automodlog": "automod", "messagelog": "message"}
 
 intents = discord.Intents.default()
@@ -426,9 +425,17 @@ async def on_member_join(member):
 
 @client.event
 async def on_member_remove(member):
-    embed = discord.Embed(title="Member left", color=discord.Color.red(),
+    await asyncio.sleep(2)  # give Discord time to register a ban
+    ban = None
+    try:
+        ban = await member.guild.fetch_ban(member)
+    except discord.HTTPException:
+        pass
+    embed = discord.Embed(title="Member banned" if ban else "Member left", color=discord.Color.red(),
                           description=f"{member.mention} ({member})",
                           timestamp=discord.utils.utcnow())
+    if ban:
+        embed.add_field(name="Reason", value=clip(ban.reason or "No reason given"), inline=False)
     embed.set_footer(text=f"ID: {member.id}")
     embed.set_thumbnail(url=member.display_avatar.url)
     await send_log(member.guild.id, "member", embed)
@@ -455,7 +462,7 @@ async def on_raw_message_delete(payload):
     if not payload.guild_id:
         return
     msg = payload.cached_message
-    if msg and (msg.author == client.user or msg.author.id in IGNORED_LOG_BOTS):
+    if msg and (msg.author.bot):
         return
     embed = discord.Embed(title="Message deleted", color=discord.Color.red(),
                           timestamp=discord.utils.utcnow())
@@ -481,7 +488,7 @@ async def on_raw_message_edit(payload):
         return
     after = payload.message
     before = payload.cached_message
-    if after.author == client.user or after.author.id in IGNORED_LOG_BOTS:
+    if after.author.bot:
         return
     if before is None and after.edited_at is None:
         return  # embed-only update on an uncached message
