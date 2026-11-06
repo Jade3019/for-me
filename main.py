@@ -15,6 +15,7 @@ LOG_FILE = "logchannels.json"
 INFRACTION_FILE = "infractions.json"
 MUTE_ROLE_ID = 1558947443444555958
 APPEAL_CHANNEL_ID = 1568339091702026300
+IGNORED_LOG_BOTS = {716390085896962058, 1543313914740084768}
 LOG_COMMANDS = {"memberlog": "member", "automodlog": "automod", "messagelog": "message"}
 
 intents = discord.Intents.default()
@@ -454,7 +455,7 @@ async def on_raw_message_delete(payload):
     if not payload.guild_id:
         return
     msg = payload.cached_message
-    if msg and msg.author == client.user:
+    if msg and (msg.author == client.user or msg.author.id in IGNORED_LOG_BOTS):
         return
     embed = discord.Embed(title="Message deleted", color=discord.Color.red(),
                           timestamp=discord.utils.utcnow())
@@ -480,7 +481,7 @@ async def on_raw_message_edit(payload):
         return
     after = payload.message
     before = payload.cached_message
-    if after.author == client.user:
+    if after.author == client.user or after.author.id in IGNORED_LOG_BOTS:
         return
     if before is None and after.edited_at is None:
         return  # embed-only update on an uncached message
