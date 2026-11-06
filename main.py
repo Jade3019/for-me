@@ -9,7 +9,7 @@ token = os.getenv("DISCORD_TOKEN")
 if not token:
     raise RuntimeError("Set the DISCORD_TOKEN environment variable before starting the bot.")
 
-PREFIX = "l!"
+PREFIX = "s!"
 STICKY_FILE = "stickies.json"
 
 intents = discord.Intents.default()
@@ -68,7 +68,7 @@ async def on_message(message):
             await message.channel.send("You need the Manage Messages permission to do that.")
             return
         if not message.channel_mentions:
-            await message.channel.send("Usage: `l!sticky <message> #channel`")
+            await message.channel.send("Usage: `s!sticky <message> #channel`")
             return
         target = message.channel_mentions[-1]
         text = message.content[len(PREFIX + "sticky"):]
@@ -76,7 +76,7 @@ async def on_message(message):
             text = text.replace(ch.mention, "")
         text = text.strip()
         if not text:
-            await message.channel.send("Usage: `l!sticky <message> #channel`")
+            await message.channel.send("Usage: `s!sticky <message> #channel`")
             return
         stickies[target.id] = {"text": text, "last_id": None}
         await repost_sticky(target)
