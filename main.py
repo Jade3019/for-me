@@ -101,6 +101,10 @@ async def on_message(message):
     if message.author == client.user:
         return
 
+    if message.guild and message.content.lower().startswith(("!sticky", "!memberlog", "!automodlog", "!messagelog")):
+        await message.channel.send(f"The prefix is `{PREFIX}`, e.g. `{PREFIX}sticky hello #channel`")
+        return
+
     if message.guild and message.content.startswith(PREFIX):
         name = message.content[len(PREFIX):].split(maxsplit=1)[0].lower() if message.content[len(PREFIX):].strip() else ""
         if name in LOG_COMMANDS:
@@ -132,7 +136,16 @@ async def on_message(message):
             await message.channel.send("Usage: `s!sticky <message> #channel`")
             return
         stickies[target.id] = {"text": text, "last_id": None}
-        await repost_sticky(target)
+        try:
+            await repost_sticky(target)
+        except discord.Forbidden:
+            stickies.pop(target.id, None)
+            await message.channel.send(f"❌ I can't send messages in {target.mention}. Give me View Channel + Send Messages there.")
+            return
+        except discord.HTTPException as e:
+            stickies.pop(target.id, None)
+            await message.channel.send(f"❌ Failed: {e}")
+            return
         await message.channel.send(f"✅ Sticky message set in {target.mention}!")
         return
 
