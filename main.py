@@ -221,6 +221,12 @@ class AppealModal(discord.ui.Modal, title="Ban appeal"):
         super().__init__()
         self.guild_id = guild_id
 
+    async def on_error(self, interaction, error):
+        import traceback
+        traceback.print_exception(error)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.")
+
     async def on_submit(self, interaction):
         record = next((b for b in reversed(infractions["bans"])
                        if b["guild_id"] == self.guild_id and b["user_id"] == interaction.user.id), None)
@@ -249,6 +255,12 @@ class AppealView(discord.ui.View):
         footer = interaction.message.embeds[0].footer.text if interaction.message.embeds else ""
         m = re.search(r"Server ID: (\d+)", footer or "")
         await interaction.response.send_modal(AppealModal(int(m.group(1)) if m else 0))
+
+    async def on_error(self, interaction, error, item):
+        import traceback
+        traceback.print_exception(error)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.")
 
 
 async def unmute_loop():
