@@ -111,7 +111,7 @@ async def on_message(message):
             await run_mod_command(message, parts[0].lower(), parts[1] if len(parts) > 1 else "")
             return
 
-    if message.guild and message.content.lower().startswith(("!sticky", "!mute", "!ban", "!warn", "!memberlog", "!automodlog", "!messagelog")):
+    if message.guild and message.content.lower().startswith(("!sticky", "!mute", "!ban", "!unban", "!warn", "!memberlog", "!automodlog", "!messagelog")):
         await message.channel.send(f"The prefix is `{PREFIX}`, e.g. `{PREFIX}sticky hello #channel`")
         return
 
@@ -168,7 +168,7 @@ async def on_message(message):
 import re
 import time
 
-MOD_COMMANDS = {"mute", "ban", "warn", "bans", "mutes", "warns"}
+MOD_COMMANDS = {"mute", "ban", "unban", "warn", "bans", "mutes", "warns"}
 infractions = {"bans": [], "mutes": [], "warns": []}
 USER_RE = re.compile(r"^<@!?(\d+)>$|^(\d{15,22})$")
 DURATION_RE = re.compile(r"^(\d+)([smhdw])$", re.I)
@@ -385,7 +385,7 @@ async def run_mod_command(message, name, args):
         await list_infractions(message, name, args)
         return
 
-    needed = "ban_members" if name == "ban" else "moderate_members"
+    needed = "ban_members" if name in ("ban", "unban") else "moderate_members"
     if not need(message, needed):
         await message.channel.send("❌ You don't have permission to do that.")
         return
@@ -393,10 +393,22 @@ async def run_mod_command(message, name, args):
     tokens = args.split()
     uid = parse_user_id(tokens[0]) if tokens else None
     if uid is None:
-        usage = {"mute": "s!mute @user <time> <reason>", "ban": "s!ban @user <reason>", "warn": "s!warn @user <reason>"}[name]
+        usage = {"mute": "s!mute @user <time> <reason>", "ban": "s!ban @user <reason>", "unban": "s!unban @user|userid", "warn": "s!warn @user <reason>"}[name]
         await message.channel.send(f"Usage: `{usage}`")
         return
     rest = args.split(maxsplit=1)[1] if len(tokens) > 1 else ""
+
+    if name == "unban":
+        try:
+            await guild.unban(discord.Object(id=uid), reason=f"Unbanned by {message.author}")
+        except discord.NotFound:
+            await message.channel.send("❌ That user isn't banned.")
+            return
+        except discord.Forbidden:
+            await message.channel.send("❌ I can't unban users. Give me the Ban Members permission.")
+            return
+        await message.channel.send(f"✅ Unbanned <@{uid}> ({uid}).")
+        return
 
     if uid in (message.author.id, client.user.id):
         await message.channel.send("❌ You can't do that to that user.")
