@@ -201,6 +201,40 @@ async def on_message(message):
             await message.channel.send(f"✅ {LOG_COMMANDS[name].capitalize()} log set to {target.mention}!")
             return
 
+    if message.content.lower().strip() == PREFIX + "ping":
+        start = time.perf_counter()
+        sent = await message.channel.send("🏓 Pinging...")
+        round_trip = (time.perf_counter() - start) * 1000
+        ws = client.latency * 1000
+        status = "🟢 Online" if ws < 250 else "🟡 Slow" if ws < 500 else "🔴 Lagging"
+        embed = discord.Embed(title="🏓 Pong!", color=discord.Color.green() if ws < 250 else discord.Color.orange())
+        embed.add_field(name="Status", value=status)
+        embed.add_field(name="Websocket", value=f"{ws:.0f} ms")
+        embed.add_field(name="Response time", value=f"{round_trip:.0f} ms")
+        await sent.edit(content=None, embed=embed)
+        return
+
+    if message.content.lower().strip() == PREFIX + "commands":
+        p = PREFIX
+        embed = discord.Embed(title="📖 Commands", description=f"Prefix: `{p}`", color=discord.Color.blurple())
+        embed.add_field(name="🛡️ Moderation", inline=False, value=(
+            f"`{p}warn @user <reason>` - warn a user\n"
+            f"`{p}mute @user <time> <reason>` - mute (e.g. `10m`, `2h`, `1d`, `1w`)\n"
+            f"`{p}ban @user <reason>` - ban a user (they get an appeal button)\n"
+            f"`{p}unban <user id>` - unban a user"))
+        embed.add_field(name="📋 Infractions", inline=False, value=(
+            f"`{p}warns @user` - view warnings\n"
+            f"`{p}mutes @user` - view mutes\n"
+            f"`{p}bans @user` - view bans"))
+        embed.add_field(name="📝 Logging (Manage Server)", inline=False, value=(
+            "\n".join(f"`{p}{c} #channel` - set the {k} log channel" for c, k in LOG_COMMANDS.items())))
+        embed.add_field(name="📌 Utility", inline=False, value=(
+            f"`{p}sticky <message> #channel` - sticky message (Manage Messages)\n"
+            f"`{p}ping` - latency and bot status\n"
+            f"`{p}commands` - this list"))
+        await message.channel.send(embed=embed)
+        return
+
     if message.guild and message.content.startswith(PREFIX + "sticky"):
         if not message.author.guild_permissions.manage_messages:
             await message.channel.send("You need the Manage Messages permission to do that.")
