@@ -92,11 +92,82 @@ async def repost_sticky(channel):
         save_stickies()
 
 
+invite_cache = {}  # guild_id -> {code: (uses, inviter, invite)}
+vanity_uses = {}  # guild_id -> uses
+
+
+async def snapshot_invites(guild):
+    try:
+        invites = await guild.invites()
+    except discord.HTTPException:
+        return  # missing Manage Server permission
+    invite_cache[guild.id] = {i.code: (i.uses or 0, i.inviter, i) for i in invites}
+    if "VANITY_URL" in guild.features:
+        try:
+            vanity_uses[guild.id] = (await guild.vanity_invite()).uses or 0
+        except discord.HTTPException:
+            pass
+
+
+async def detect_join_method(member):
+    guild = member.guild
+    if member.bot:
+        try:
+            async for entry in guild.audit_logs(limit=5, action=discord.AuditLogAction.bot_add):
+                if entry.target and entry.target.id == member.id:
+                    return f"Bot added by {entry.user.mention} ({entry.user})"
+        except discord.HTTPException:
+            pass
+        return "Bot added via OAuth2 link"
+    old = invite_cache.get(guild.id)
+    if old is None:
+        return "Unknown (I need the Manage Server permission to track invites)"
+    try:
+        invites = await guild.invites()
+    except discord.HTTPException:
+        return "Unknown"
+    new = {i.code: (i.uses or 0, i.inviter, i) for i in invites}
+    invite_cache[guild.id] = new
+    used = [c for c, (uses, _, _) in new.items() if uses > old.get(c, (0,))[0]]
+    gone = [c for c in old if c not in new]  # single-use/expired invites vanish once used
+    if len(used) == 1 or (not used and len(gone) == 1):
+        code = used[0] if used else gone[0]
+        _, inviter, inv = new[code] if used else old[code]
+        who = f"{inviter.mention} ({inviter})" if inviter else "unknown"
+        return f"Invite `{code}` by {who}"
+    if "VANITY_URL" in guild.features:
+        try:
+            uses = (await guild.vanity_invite()).uses or 0
+        except discord.HTTPException:
+            uses = None
+        if uses is not None and uses > vanity_uses.get(guild.id, uses):
+            vanity_uses[guild.id] = uses
+            return "Vanity URL (discord.gg/" + (guild.vanity_url_code or "?") + ")"
+        if uses is not None:
+            vanity_uses[guild.id] = uses
+    if len(used) > 1:
+        return "Unclear - one of: " + ", ".join(f"`{c}`" for c in used)
+    return "Unknown (possibly Server Discovery, a website/Discord widget, or a Discord-integrated link)"
+
+
+@client.event
+async def on_invite_create(invite):
+    if invite.guild:
+        await snapshot_invites(invite.guild)
+
+
+@client.event
+async def on_invite_delete(invite):
+    pass  # keep cached copy so single-use invites can be matched on join
+
+
 @client.event
 async def on_ready():
     load_stickies()
     load_logs()
     load_infractions()
+    for g in client.guilds:
+        await snapshot_invites(g)
     print(f"Logged in as {client.user}")
 
 
@@ -502,10 +573,12 @@ async def on_interaction(interaction):
 
 @client.event
 async def on_member_join(member):
+    how = await detect_join_method(member)
     embed = discord.Embed(title="Member joined", color=discord.Color.green(),
                           description=f"{member.mention} ({member})",
                           timestamp=discord.utils.utcnow())
     embed.add_field(name="Account created", value=discord.utils.format_dt(member.created_at, "R"))
+    embed.add_field(name="Joined via", value=clip(how), inline=False)
     embed.set_footer(text=f"ID: {member.id}")
     embed.set_thumbnail(url=member.display_avatar.url)
     await send_log(member.guild.id, "member", embed)
@@ -550,23 +623,17 @@ async def on_raw_message_delete(payload):
     if not payload.guild_id:
         return
     msg = payload.cached_message
-    if msg and (msg.author.bot):
-        return
+    if msg is None or msg.author.bot:
+        return  # can't tell who sent it (or it was a bot), so don't log it
     embed = discord.Embed(title="Message deleted", color=discord.Color.red(),
                           timestamp=discord.utils.utcnow())
     embed.add_field(name="Channel", value=f"<#{payload.channel_id}>")
-    extra = []
-    if msg:
-        bot_tag = " [BOT]" if msg.author.bot else ""
-        embed.add_field(name="Author", value=f"{msg.author.mention} ({msg.author}){bot_tag}")
-        embed.add_field(name="Content", value=clip(msg.content), inline=False)
-        if msg.attachments:
-            embed.add_field(name="Attachments", value=clip("\n".join(a.url for a in msg.attachments)), inline=False)
-        extra = msg.embeds
-        embed.set_footer(text=f"Author ID: {msg.author.id} | Message ID: {msg.id}")
-    else:
-        embed.description = "The message wasn't cached, so its content is unknown."
-        embed.set_footer(text=f"Message ID: {payload.message_id}")
+    embed.add_field(name="Author", value=f"{msg.author.mention} ({msg.author})")
+    embed.add_field(name="Content", value=clip(msg.content), inline=False)
+    if msg.attachments:
+        embed.add_field(name="Attachments", value=clip("\n".join(a.url for a in msg.attachments)), inline=False)
+    extra = msg.embeds
+    embed.set_footer(text=f"Author ID: {msg.author.id} | Message ID: {msg.id}")
     await send_log(payload.guild_id, "message", embed, extra)
 
 
@@ -578,17 +645,16 @@ async def on_raw_message_edit(payload):
     before = payload.cached_message
     if after.author.bot:
         return
-    if before is None and after.edited_at is None:
-        return  # embed-only update on an uncached message
-    if before and before.content == after.content and before.embeds == after.embeds:
+    if before is None:
+        return  # not cached, so we can't show what changed
+    if before.content == after.content and before.embeds == after.embeds:
         return
     embed = discord.Embed(title="Message edited", color=discord.Color.blue(),
                           description=f"[Jump to message]({after.jump_url})",
                           timestamp=discord.utils.utcnow())
-    bot_tag = " [BOT]" if after.author.bot else ""
-    embed.add_field(name="Author", value=f"{after.author.mention} ({after.author}){bot_tag}")
+    embed.add_field(name="Author", value=f"{after.author.mention} ({after.author})")
     embed.add_field(name="Channel", value=f"<#{payload.channel_id}>")
-    embed.add_field(name="Before", value=clip(before.content) if before else "*(not cached)*", inline=False)
+    embed.add_field(name="Before", value=clip(before.content), inline=False)
     embed.add_field(name="After", value=clip(after.content), inline=False)
     embed.set_footer(text=f"Author ID: {after.author.id} | Message ID: {after.id}")
     await send_log(payload.guild_id, "message", embed, after.embeds)
