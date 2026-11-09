@@ -12,6 +12,7 @@ if not token:
 PREFIX = "s!"
 STICKY_FILE = "stickies.json"
 LOG_FILE = "logchannels.json"
+INVITE_SOURCE_FILE = "invitesources.json"
 INFRACTION_FILE = "infractions.json"
 MUTE_ROLE_ID = 1558947443444555958
 APPEAL_CHANNEL_ID = 1568339091702026300
@@ -54,6 +55,21 @@ def load_logs():
 def save_logs():
     with open(LOG_FILE, "w") as f:
         json.dump({str(gid): data for gid, data in log_channels.items()}, f)
+
+
+invite_sources = {}
+
+
+def load_invite_sources():
+    if os.path.exists(INVITE_SOURCE_FILE):
+        with open(INVITE_SOURCE_FILE) as f:
+            for gid, sources in json.load(f).items():
+                invite_sources[int(gid)] = sources
+
+
+def save_invite_sources():
+    with open(INVITE_SOURCE_FILE, "w") as f:
+        json.dump({str(gid): sources for gid, sources in invite_sources.items()}, f)
 
 
 def clip(text, limit=1000):
@@ -109,6 +125,25 @@ async def snapshot_invites(guild):
             pass
 
 
+def format_invite_attribution(guild_id, code, invite):
+    source = invite_sources.get(guild_id, {}).get(code)
+    if source:
+        lines = [f"Website/source: {source}"]
+    else:
+        lines = [
+            "Website/source: unknown (Discord does not share the referring webpage; "
+            "register a unique invite for each site with `s!invitesource`)"
+        ]
+    lines.append(f"Invite: https://discord.gg/{code}")
+    inviter = getattr(invite, "inviter", None)
+    if inviter:
+        lines.append(f"Created by: {inviter.mention} ({inviter})")
+    channel = getattr(invite, "channel", None)
+    if channel:
+        lines.append(f"Invite channel: {channel.mention}")
+    return "\n".join(lines)
+
+
 async def detect_join_method(member):
     guild = member.guild
     if member.bot:
@@ -121,20 +156,19 @@ async def detect_join_method(member):
         return "Bot added via OAuth2 link"
     old = invite_cache.get(guild.id)
     if old is None:
-        return "Unknown (I need the Manage Server permission to track invites)"
+        return "Unknown (invite tracking needs the Manage Server permission; Discord does not provide website referrers)"
     try:
         invites = await guild.invites()
     except discord.HTTPException:
-        return "Unknown"
+        return "Unknown (I couldn't read server invites; check the bot's Manage Server permission)"
     new = {i.code: (i.uses or 0, i.inviter, i) for i in invites}
     invite_cache[guild.id] = new
     used = [c for c, (uses, _, _) in new.items() if uses > old.get(c, (0,))[0]]
     gone = [c for c in old if c not in new]  # single-use/expired invites vanish once used
     if len(used) == 1 or (not used and len(gone) == 1):
         code = used[0] if used else gone[0]
-        _, inviter, inv = new[code] if used else old[code]
-        who = f"{inviter.mention} ({inviter})" if inviter else "unknown"
-        return f"Invite `{code}` by {who}"
+        inv = new[code][2] if used else old[code][2]
+        return format_invite_attribution(guild.id, code, inv)
     if "VANITY_URL" in guild.features:
         try:
             uses = (await guild.vanity_invite()).uses or 0
@@ -142,12 +176,17 @@ async def detect_join_method(member):
             uses = None
         if uses is not None and uses > vanity_uses.get(guild.id, uses):
             vanity_uses[guild.id] = uses
-            return "Vanity URL (discord.gg/" + (guild.vanity_url_code or "?") + ")"
+            code = guild.vanity_url_code or "?"
+            return "Vanity URL\n" + format_invite_attribution(guild.id, code, None)
         if uses is not None:
             vanity_uses[guild.id] = uses
     if len(used) > 1:
-        return "Unclear - one of: " + ", ".join(f"`{c}`" for c in used)
-    return "Unknown (possibly Server Discovery, a website/Discord widget, or a Discord-integrated link)"
+        details = [format_invite_attribution(guild.id, code, new[code][2]) for code in used]
+        return "Unclear - multiple invite uses changed during this join:\n" + "\n\n".join(details)
+    return (
+        "Unknown (no invite-use change was detected. Discord does not provide the "
+        "referring website; use a separate registered invite link for each site.)"
+    )
 
 
 @client.event
@@ -165,6 +204,7 @@ async def on_invite_delete(invite):
 async def on_ready():
     load_stickies()
     load_logs()
+    load_invite_sources()
     load_infractions()
     for g in client.guilds:
         await snapshot_invites(g)
@@ -180,6 +220,49 @@ async def on_message(message):
         parts = message.content[len(PREFIX):].split(maxsplit=1)
         if parts and parts[0].lower() in MOD_COMMANDS:
             await run_mod_command(message, parts[0].lower(), parts[1] if len(parts) > 1 else "")
+            return
+
+    if message.guild and message.content.startswith(PREFIX):
+        parts = message.content[len(PREFIX):].split(maxsplit=2)
+        command = parts[0].lower() if parts else ""
+        if command in {"invitesource", "invitesources"}:
+            if not message.author.guild_permissions.manage_guild:
+                await message.channel.send("You need the Manage Server permission to manage invite sources.")
+                return
+            if command == "invitesources":
+                sources = invite_sources.get(message.guild.id, {})
+                lines = [f"`{code}` → {source}" for code, source in sources.items()]
+                description = "\n".join(lines) if lines else "No invite sources are configured."
+                await message.channel.send(embed=discord.Embed(
+                    title="Invite website sources", description=clip(description, 4000)))
+                return
+            if len(parts) < 3:
+                await message.channel.send(
+                    f"Usage: `{PREFIX}invitesource <invite-code-or-link> <website>` "
+                    f"or `{PREFIX}invitesource <invite-code-or-link> remove`")
+                return
+            code = parts[1].split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+            source = parts[2].strip()
+            if not code or any(char.isspace() for char in code) or len(code) > 100:
+                await message.channel.send("❌ That invite code doesn't look valid.")
+                return
+            if source.lower() == "remove":
+                sources = invite_sources.get(message.guild.id, {})
+                if sources.pop(code, None) is None:
+                    await message.channel.send(f"No website source was configured for `{code}`.")
+                else:
+                    if not sources:
+                        invite_sources.pop(message.guild.id, None)
+                    save_invite_sources()
+                    await message.channel.send(f"✅ Removed the website source for `{code}`.")
+                return
+            if not source or len(source) > 200:
+                await message.channel.send("❌ The website label must be between 1 and 200 characters.")
+                return
+            sources = invite_sources.setdefault(message.guild.id, {})
+            sources[code] = source
+            save_invite_sources()
+            await message.channel.send(f"✅ Website source saved for invite `{code}`.")
             return
 
     if message.guild and message.content.lower().startswith(("!sticky", "!mute", "!ban", "!unban", "!warn", "!memberlog", "!automodlog", "!messagelog")):
@@ -228,6 +311,10 @@ async def on_message(message):
             f"`{p}bans @user` - view bans"))
         embed.add_field(name="📝 Logging (Manage Server)", inline=False, value=(
             "\n".join(f"`{p}{c} #channel` - set the {k} log channel" for c, k in LOG_COMMANDS.items())))
+        embed.add_field(name="🔗 Invite attribution (Manage Server)", inline=False, value=(
+            f"`{p}invitesource <invite-code-or-link> <website>` - label a unique invite for a website\n"
+            f"`{p}invitesource <invite-code-or-link> remove` - remove a source label\n"
+            f"`{p}invitesources` - list source labels"))
         embed.add_field(name="📌 Utility", inline=False, value=(
             f"`{p}sticky <message> #channel` - sticky message (Manage Messages)\n"
             f"`{p}ping` - latency and bot status\n"
