@@ -831,11 +831,23 @@ async def run_mod_command(message, name, args):
     else:
         await message.channel.send(f"✅ Banned <@{uid}>.")
     
+    # Send DM to banned user if possible
+    try:
+        dm_embed = discord.Embed(title=f"You have been banned from {guild.name}", color=discord.Color.red())
+        dm_embed.add_field(name="Reason", value=clip(reason), inline=False)
+        dm_embed.add_field(name="Appeal", 
+                          value=f"If you believe you were banned for the wrong reasons, DM <@729509574486523907>", 
+                          inline=False)
+        dm_embed.set_footer(text=f"Server ID: {guild.id}")
+        await user.send(embed=dm_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    
     embed = discord.Embed(title=f"User banned", color=discord.Color.red())
     embed.add_field(name="User", value=f"{user} (ID: {uid})", inline=False)
     embed.add_field(name="Reason", value=clip(reason), inline=False)
-    embed.add_field(name="Appeal command", 
-                    value=f"`{PREFIX}appeal {guild.id} <reason>`", 
+    embed.add_field(name="Appeal instructions", 
+                    value=f"User should DM <@729509574486523907> if they believe the ban is wrong", 
                     inline=False)
     embed.set_footer(text=f"Server ID: {guild.id}")
     await send_log(guild.id, "server", embed)
