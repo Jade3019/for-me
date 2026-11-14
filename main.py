@@ -426,22 +426,27 @@ class AppealModal(discord.ui.Modal, title="Ban appeal"):
         try:
             print(f"DEBUG: Modal submitted by {interaction.user}")
             print(f"DEBUG: Guild ID: {self.guild_id}, User ID: {interaction.user.id}")
+            print(f"DEBUG: Interaction context - Guild: {interaction.guild}, Channel DM: {interaction.channel.type == discord.ChannelType.private if interaction.channel else 'N/A'}")
+            
             record = next((b for b in reversed(infractions["bans"])
                            if b["guild_id"] == self.guild_id and b["user_id"] == interaction.user.id), None)
             print(f"DEBUG: Ban record found: {record is not None}")
+            
             channel = client.get_channel(APPEAL_CHANNEL_ID)
             print(f"DEBUG: Appeal channel found: {channel is not None}")
             if channel is None:
                 await interaction.response.send_message("❌ Appeal channel not found, please contact staff.")
                 return
+            
             embed = discord.Embed(title="Ban appeal", color=discord.Color.gold(),
                                   timestamp=discord.utils.utcnow())
-            embed.add_field(name="Appeal from", value=f"<@{interaction.user.id}> ({interaction.user})", inline=False)
+            embed.add_field(name="Appeal from", value=f"{interaction.user} (ID: {interaction.user.id})", inline=False)
             embed.add_field(name="Ban reason", value=clip(record["reason"]) if record else "*(unknown)*", inline=False)
             if record:
                 embed.add_field(name="Banned for", value=f"{fmt_seconds(int(time.time()) - record['ts'])} (since <t:{record['ts']}:f>)", inline=False)
             embed.add_field(name="Appeal", value=clip(self.reason.value), inline=False)
-            embed.set_footer(text=f"User ID: {interaction.user.id}")
+            embed.set_footer(text=f"User ID: {interaction.user.id} | Guild ID: {self.guild_id}")
+            
             await channel.send(embed=embed, view=AppealReviewView())
             print("DEBUG: Appeal message sent to staff channel")
             await interaction.response.send_message("✅ Your appeal has been sent to the staff team.")
@@ -508,21 +513,36 @@ class AppealReviewView(discord.ui.View):
         if not interaction.user.guild_permissions.ban_members:
             await interaction.response.send_message("❌ You need the Ban Members permission.", ephemeral=True)
             return
+        
         old = interaction.message.embeds[0]
-        m = re.search(r"User ID: (\d+)", old.footer.text or "")
-        if not m:
+        footer_text = old.footer.text or ""
+        
+        user_match = re.search(r"User ID: (\d+)", footer_text)
+        guild_match = re.search(r"Guild ID: (\d+)", footer_text)
+        
+        if not user_match:
             await interaction.response.send_message("❌ Couldn't find the user in this appeal.", ephemeral=True)
             return
-        uid = int(m.group(1))
+        
+        uid = int(user_match.group(1))
+        guild_id = int(guild_match.group(1)) if guild_match else None
+        
+        print(f"DEBUG: Handling appeal - User ID: {uid}, Guild ID: {guild_id}, Approved: {approved}")
+        
         await interaction.response.defer()
+        
         try:
             user = await client.fetch_user(uid)
         except discord.HTTPException:
             await interaction.followup.send("❌ Couldn't find the user. Please try again.", ephemeral=True)
             return
-        if approved:
+        
+        guild = client.get_guild(guild_id) if guild_id else None
+        guild_name = guild.name if guild else f"Server {guild_id}"
+        
+        if approved and guild:
             try:
-                await interaction.guild.unban(user, reason=f"Appeal approved by {interaction.user}")
+                await guild.unban(user, reason=f"Appeal approved by {interaction.user}")
             except discord.NotFound:
                 pass
             except discord.Forbidden:
@@ -531,10 +551,11 @@ class AppealReviewView(discord.ui.View):
             except discord.HTTPException:
                 await interaction.followup.send("❌ Couldn't unban that user. Please try again.", ephemeral=True)
                 return
+        
         result = "approved" if approved else "declined"
         dm = discord.Embed(title=f"Appeal {result}",
                            color=discord.Color.green() if approved else discord.Color.red(),
-                           description=f"Your ban appeal for {interaction.guild.name} has been {result}.")
+                           description=f"Your ban appeal for {guild_name} has been {result}.")
         sent = await dm_user(user, dm)
         embed = old.copy()
         embed.color = discord.Color.green() if approved else discord.Color.red()
