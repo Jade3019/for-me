@@ -6,14 +6,15 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token"}), patch.object(discord.Client, "run"):
+with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "modmail_channel_id": "456"}), \
+        patch.object(discord.Client, "run"):
     main = importlib.import_module("main")
 
 
 class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         embed = discord.Embed(title="Ban appeal")
-        embed.set_footer(text="User ID: 123456789012345678")
+        embed.set_footer(text="User ID: 123456789012345678 | Guild ID: 456")
         self.interaction = SimpleNamespace(
             user=SimpleNamespace(
                 guild_permissions=SimpleNamespace(ban_members=True),
@@ -30,6 +31,7 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def run_review(self, approved, dm_succeeds=True):
         with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)), \
+                patch.object(main.client, "get_guild", return_value=self.interaction.guild), \
                 patch.object(main, "dm_user", AsyncMock(return_value=dm_succeeds)) as dm:
             await self.view.handle(self.interaction, approved)
         return dm

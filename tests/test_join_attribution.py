@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token"}), patch.object(discord.Client, "run"):
+with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "modmail_channel_id": "456"}), \
+        patch.object(discord.Client, "run"):
     main = importlib.import_module("main")
 
 
@@ -67,7 +68,7 @@ class JoinAttributionTests(unittest.IsolatedAsyncioTestCase):
             path = os.path.join(directory, "invitesources.json")
             message = SimpleNamespace(
                 author=SimpleNamespace(guild_permissions=SimpleNamespace(manage_guild=True)),
-                channel=SimpleNamespace(send=AsyncMock()),
+                channel=SimpleNamespace(id=456, send=AsyncMock()),
                 content="s!invitesource https://discord.gg/abc123?ref=profile https://example.com/community",
                 guild=SimpleNamespace(id=self.guild.id),
             )

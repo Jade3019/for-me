@@ -1,0 +1,166 @@
+import importlib
+import json
+import os
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import discord
+
+with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "modmail_channel_id": "456"}), \
+        patch.object(discord.Client, "run"):
+    main = importlib.import_module("main")
+
+
+class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        main.appeals.clear()
+        main.infractions["bans"] = [{
+            "guild_id": 123,
+            "user_id": 789,
+            "reason": "spam",
+            "ts": 100,
+        }]
+        self.dm_channel = SimpleNamespace(send=AsyncMock())
+        self.user = SimpleNamespace(
+            id=789,
+            name="user",
+            global_name="Global User",
+            send=AsyncMock(),
+        )
+        self.thread = SimpleNamespace(
+            id=654,
+            send=AsyncMock(),
+            edit=AsyncMock(),
+        )
+        self.starter = SimpleNamespace(create_thread=AsyncMock(return_value=self.thread))
+        self.modmail_channel = SimpleNamespace(send=AsyncMock(return_value=self.starter))
+        self.guild = SimpleNamespace(
+            id=123,
+            name="Test server",
+            fetch_ban=AsyncMock(),
+        )
+        self.message = SimpleNamespace(
+            content="I believe this ban was a mistake.",
+            author=self.user,
+            channel=self.dm_channel,
+            attachments=[],
+        )
+
+    async def test_dm_opens_thread_with_requested_modmail_instructions(self):
+        with patch.object(main.client, "get_guild", return_value=self.guild), \
+                patch.object(main.client, "get_channel", return_value=self.modmail_channel), \
+                patch.object(main, "save_appeals") as save:
+            await main.handle_appeal_dm(self.message)
+
+        self.guild.fetch_ban.assert_awaited_once()
+        intro = self.thread.send.await_args.args[0]
+        self.assertIn("New modmail from **Global User** (`789`).", intro)
+        self.assertIn("`//` for an internal note that is NOT sent", intro)
+        self.assertIn("`!close` to close this.", intro)
+        self.thread.send.assert_awaited_once()
+        self.assertEqual(main.appeals[654]["status"], "open")
+        save.assert_called_once()
+
+    async def test_user_reply_is_forwarded_to_existing_thread(self):
+        main.appeals[654] = {
+            "thread_id": 654,
+            "user_id": 789,
+            "guild_id": 123,
+            "status": "open",
+        }
+        self.message.content = "More context"
+        with patch.object(main.client, "get_channel", return_value=self.thread):
+            await main.handle_appeal_dm(self.message)
+
+        self.thread.send.assert_awaited_once()
+        self.assertIn("More context", self.thread.send.await_args.args[0])
+
+    async def test_multiple_active_bans_require_a_server_id(self):
+        main.infractions["bans"].append({
+            "guild_id": 321,
+            "user_id": 789,
+            "reason": "spam",
+            "ts": 200,
+        })
+        self.message.content = "Please review my ban."
+        second_guild = SimpleNamespace(
+            id=321,
+            name="Second server",
+            fetch_ban=AsyncMock(),
+        )
+        guilds = {123: self.guild, 321: second_guild}
+
+        with patch.object(main.client, "get_guild", side_effect=guilds.get):
+            await main.handle_appeal_dm(self.message)
+
+        self.dm_channel.send.assert_awaited_once()
+        self.assertIn("123", self.dm_channel.send.await_args.args[0])
+        self.modmail_channel.send.assert_not_awaited()
+
+    def test_open_thread_records_persist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "appeals.json")
+            with patch.object(main, "APPEALS_FILE", path):
+                main.appeals[654] = {
+                    "thread_id": 654,
+                    "user_id": 789,
+                    "guild_id": 123,
+                    "status": "open",
+                }
+                main.save_appeals()
+                main.appeals.clear()
+                main.load_appeals()
+
+            with open(path) as appeals_file:
+                saved = json.load(appeals_file)
+            self.assertEqual(main.appeals[654]["status"], "open")
+            self.assertIn("654", saved)
+
+    async def test_internal_note_is_not_sent_to_user(self):
+        main.appeals[654] = {
+            "thread_id": 654,
+            "user_id": 789,
+            "guild_id": 123,
+            "status": "open",
+        }
+        staff_message = SimpleNamespace(
+            content="// check the ban logs",
+            author=SimpleNamespace(guild_permissions=SimpleNamespace(ban_members=True)),
+            channel=self.thread,
+            attachments=[],
+        )
+        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)):
+            await main.handle_appeal_staff_message(staff_message, main.appeals[654])
+
+        self.user.send.assert_not_awaited()
+
+    async def test_staff_reply_is_sent_to_user_and_close_archives_thread(self):
+        main.appeals[654] = {
+            "thread_id": 654,
+            "user_id": 789,
+            "guild_id": 123,
+            "status": "open",
+        }
+        staff_message = SimpleNamespace(
+            content="We reviewed your appeal.",
+            author=SimpleNamespace(guild_permissions=SimpleNamespace(ban_members=True)),
+            channel=self.thread,
+            attachments=[],
+        )
+        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)):
+            await main.handle_appeal_staff_message(staff_message, main.appeals[654])
+            self.assertIn("We reviewed your appeal.", self.user.send.await_args.args[0])
+
+            staff_message.content = "!close"
+            with patch.object(main, "save_appeals") as save:
+                await main.handle_appeal_staff_message(staff_message, main.appeals[654])
+
+        self.assertEqual(main.appeals[654]["status"], "closed")
+        self.thread.edit.assert_awaited_once_with(archived=True, locked=True)
+        save.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
