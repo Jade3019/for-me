@@ -286,6 +286,64 @@ async def on_message(message):
             await message.channel.send(f"✅ {LOG_COMMANDS[name].capitalize()} log set to {target.mention}!")
             return
 
+    if message.content.lower().strip().startswith(PREFIX + "appeal"):
+        if message.guild:
+            await message.channel.send("❌ Use this command in DMs with the bot.")
+            return
+        
+        parts = message.content[len(PREFIX):].split(maxsplit=2)
+        if len(parts) < 2:
+            await message.channel.send(
+                f"Usage: `{PREFIX}appeal <guild_id> <reason>`\n"
+                f"Example: `{PREFIX}appeal 987654321 I wasn't actually hacking`")
+            return
+        
+        try:
+            guild_id = int(parts[1])
+        except ValueError:
+            await message.channel.send("❌ Guild ID must be a number.")
+            return
+        
+        reason = parts[2] if len(parts) > 2 else ""
+        if not reason:
+            await message.channel.send("❌ Please provide an appeal reason.")
+            return
+        
+        guild = client.get_guild(guild_id)
+        if guild is None:
+            await message.channel.send("❌ The bot is not in that server.")
+            return
+        
+        record = next((b for b in reversed(infractions["bans"])
+                       if b["guild_id"] == guild_id and b["user_id"] == message.author.id), None)
+        if record is None:
+            await message.channel.send(f"❌ You're not banned from that server (Guild ID: {guild_id}).")
+            return
+        
+        appeal_channel_id = log_channels.get(guild_id, {}).get("appeal") or APPEAL_CHANNEL_ID
+        appeal_channel = client.get_channel(appeal_channel_id)
+        if appeal_channel is None:
+            await message.channel.send("❌ The appeal channel is not configured. Please contact staff.")
+            return
+        
+        embed = discord.Embed(title="Ban appeal", color=discord.Color.gold(),
+                              timestamp=discord.utils.utcnow())
+        embed.add_field(name="Appeal from", value=f"{message.author} (ID: {message.author.id})", inline=False)
+        embed.add_field(name="Ban reason", value=clip(record["reason"]) if record else "*(unknown)*", inline=False)
+        if record:
+            embed.add_field(name="Banned for", value=f"{fmt_seconds(int(time.time()) - record['ts'])} (since <t:{record['ts']}:f>)", inline=False)
+        embed.add_field(name="Appeal", value=clip(reason), inline=False)
+        embed.set_footer(text=f"User ID: {message.author.id} | Guild ID: {guild_id}")
+        
+        try:
+            await appeal_channel.send(embed=embed, view=AppealReviewView())
+            await message.channel.send("✅ Your appeal has been sent to the staff team.")
+            print(f"DEBUG: Appeal submitted by {message.author} for guild {guild_id}")
+        except Exception as e:
+            print(f"DEBUG: Error sending appeal: {e}")
+            await message.channel.send(f"❌ Failed to send appeal. Please contact staff.")
+        return
+
     if message.content.lower().strip() == PREFIX + "ping":
         start = time.perf_counter()
         sent = await message.channel.send("🏓 Pinging...")
@@ -761,9 +819,11 @@ async def run_mod_command(message, name, args):
     
     embed = discord.Embed(title=f"You have been banned from {guild.name}", color=discord.Color.red())
     embed.add_field(name="Reason", value=clip(reason), inline=False)
-    embed.add_field(name="Want to be unbanned?", value="Click **Appeal** below and explain why you should be unbanned.", inline=False)
+    embed.add_field(name="Want to appeal?", 
+                    value=f"Send this message in DMs to the bot:\n`{PREFIX}appeal {guild.id} <your reason>`\n\nExample: `{PREFIX}appeal {guild.id} I wasn't hacking`", 
+                    inline=False)
     embed.set_footer(text=f"Server ID: {guild.id}")
-    sent = await dm_user(user, embed, AppealView())
+    sent = await dm_user(user, embed)
     try:
         await guild.ban(user, reason=f"{message.author}: {reason}")
     except discord.Forbidden:
