@@ -675,6 +675,10 @@ async def run_mod_command(message, name, args):
         await message.channel.send("❌ User not found.")
         return
     
+    if member and message.author.top_role <= member.top_role:
+        await message.channel.send("❌ You can't ban a member with a role equal to or higher than yours.")
+        return
+    
     if is_hacked:
         await message.channel.send(f"🔄 Deleting all messages from <@{uid}>...")
         deleted_count = 0
