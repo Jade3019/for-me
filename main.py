@@ -416,28 +416,42 @@ class AppealModal(discord.ui.Modal, title="Ban appeal"):
         self.guild_id = guild_id
 
     async def on_error(self, interaction, error):
+        print(f"DEBUG: Modal on_error: {type(error).__name__}: {error}")
         import traceback
-        traceback.print_exception(error)
+        traceback.print_exc()
         if not interaction.response.is_done():
-            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.")
+            await interaction.response.send_message(f"❌ Error: {type(error).__name__}: {error}")
 
     async def on_submit(self, interaction):
-        record = next((b for b in reversed(infractions["bans"])
-                       if b["guild_id"] == self.guild_id and b["user_id"] == interaction.user.id), None)
-        channel = client.get_channel(APPEAL_CHANNEL_ID)
-        if channel is None:
-            await interaction.response.send_message("❌ Appeal channel not found, please contact staff.")
-            return
-        embed = discord.Embed(title="Ban appeal", color=discord.Color.gold(),
-                              timestamp=discord.utils.utcnow())
-        embed.add_field(name="Appeal from", value=f"<@{interaction.user.id}> ({interaction.user})", inline=False)
-        embed.add_field(name="Ban reason", value=clip(record["reason"]) if record else "*(unknown)*", inline=False)
-        if record:
-            embed.add_field(name="Banned for", value=f"{fmt_seconds(int(time.time()) - record['ts'])} (since <t:{record['ts']}:f>)", inline=False)
-        embed.add_field(name="Appeal", value=clip(self.reason.value), inline=False)
-        embed.set_footer(text=f"User ID: {interaction.user.id}")
-        await channel.send(embed=embed, view=AppealReviewView())
-        await interaction.response.send_message("✅ Your appeal has been sent to the staff team.")
+        try:
+            print(f"DEBUG: Modal submitted by {interaction.user}")
+            print(f"DEBUG: Guild ID: {self.guild_id}, User ID: {interaction.user.id}")
+            record = next((b for b in reversed(infractions["bans"])
+                           if b["guild_id"] == self.guild_id and b["user_id"] == interaction.user.id), None)
+            print(f"DEBUG: Ban record found: {record is not None}")
+            channel = client.get_channel(APPEAL_CHANNEL_ID)
+            print(f"DEBUG: Appeal channel found: {channel is not None}")
+            if channel is None:
+                await interaction.response.send_message("❌ Appeal channel not found, please contact staff.")
+                return
+            embed = discord.Embed(title="Ban appeal", color=discord.Color.gold(),
+                                  timestamp=discord.utils.utcnow())
+            embed.add_field(name="Appeal from", value=f"<@{interaction.user.id}> ({interaction.user})", inline=False)
+            embed.add_field(name="Ban reason", value=clip(record["reason"]) if record else "*(unknown)*", inline=False)
+            if record:
+                embed.add_field(name="Banned for", value=f"{fmt_seconds(int(time.time()) - record['ts'])} (since <t:{record['ts']}:f>)", inline=False)
+            embed.add_field(name="Appeal", value=clip(self.reason.value), inline=False)
+            embed.set_footer(text=f"User ID: {interaction.user.id}")
+            await channel.send(embed=embed, view=AppealReviewView())
+            print("DEBUG: Appeal message sent to staff channel")
+            await interaction.response.send_message("✅ Your appeal has been sent to the staff team.")
+            print("DEBUG: Confirmation sent to user")
+        except Exception as e:
+            print(f"DEBUG: Exception in on_submit: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"❌ Error: {type(e).__name__}: {e}")
 
 
 class AppealView(discord.ui.View):
@@ -447,29 +461,43 @@ class AppealView(discord.ui.View):
     @discord.ui.button(label="Appeal", style=discord.ButtonStyle.primary, custom_id="ban_appeal")
     async def appeal(self, interaction, button):
         try:
-            if interaction.message and interaction.message.embeds:
+            print(f"DEBUG: Appeal button clicked by {interaction.user}")
+            print(f"DEBUG: Message exists: {interaction.message is not None}")
+            if interaction.message:
+                print(f"DEBUG: Message has embeds: {len(interaction.message.embeds) if interaction.message.embeds else 0}")
+                if interaction.message.embeds:
+                    print(f"DEBUG: First embed footer: {interaction.message.embeds[0].footer}")
+            
+            if interaction.message and interaction.message.embeds and interaction.message.embeds[0].footer:
                 footer_text = interaction.message.embeds[0].footer.text or ""
+                print(f"DEBUG: Footer text: {footer_text}")
                 m = re.search(r"Server ID: (\d+)", footer_text)
                 guild_id = int(m.group(1)) if m else 0
+                print(f"DEBUG: Extracted guild_id: {guild_id}")
             else:
                 guild_id = 0
+                print("DEBUG: No footer found")
             
             if guild_id == 0:
                 await interaction.response.send_message("❌ Could not determine server ID. Please contact staff.", ephemeral=True)
                 return
             
+            print(f"DEBUG: Creating modal with guild_id {guild_id}")
             await interaction.response.send_modal(AppealModal(guild_id))
+            print("DEBUG: Modal sent successfully")
         except Exception as e:
+            print(f"DEBUG: Exception in appeal button: {type(e).__name__}: {e}")
             import traceback
-            traceback.print_exception(e)
+            traceback.print_exc()
             if not interaction.response.is_done():
-                await interaction.response.send_message("❌ Something went wrong, please contact a staff member.", ephemeral=True)
+                await interaction.response.send_message(f"❌ Error: {type(e).__name__}: {e}", ephemeral=True)
 
     async def on_error(self, interaction, error, item):
+        print(f"DEBUG: on_error called: {type(error).__name__}: {error}")
         import traceback
-        traceback.print_exception(error)
+        traceback.print_exc()
         if not interaction.response.is_done():
-            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.", ephemeral=True)
+            await interaction.response.send_message(f"❌ Error: {type(error).__name__}", ephemeral=True)
 
 
 class AppealReviewView(discord.ui.View):
