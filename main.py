@@ -440,19 +440,35 @@ class AppealModal(discord.ui.Modal, title="Ban appeal"):
 
 
 class AppealView(discord.ui.View):
-    def __init__(self, guild_id):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.guild_id = guild_id
 
     @discord.ui.button(label="Appeal", style=discord.ButtonStyle.primary, custom_id="ban_appeal")
     async def appeal(self, interaction, button):
-        await interaction.response.send_modal(AppealModal(self.guild_id))
+        try:
+            if interaction.message and interaction.message.embeds:
+                footer_text = interaction.message.embeds[0].footer.text or ""
+                m = re.search(r"Server ID: (\d+)", footer_text)
+                guild_id = int(m.group(1)) if m else 0
+            else:
+                guild_id = 0
+            
+            if guild_id == 0:
+                await interaction.response.send_message("❌ Could not determine server ID. Please contact staff.", ephemeral=True)
+                return
+            
+            await interaction.response.send_modal(AppealModal(guild_id))
+        except Exception as e:
+            import traceback
+            traceback.print_exception(e)
+            if not interaction.response.is_done():
+                await interaction.response.send_message("❌ Something went wrong, please contact a staff member.", ephemeral=True)
 
     async def on_error(self, interaction, error, item):
         import traceback
         traceback.print_exception(error)
         if not interaction.response.is_done():
-            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.")
+            await interaction.response.send_message("❌ Something went wrong, please contact a staff member.", ephemeral=True)
 
 
 class AppealReviewView(discord.ui.View):
@@ -536,7 +552,7 @@ async def unmute_loop():
 
 async def setup():
     print("setup_hook: registering appeal views")
-    client.add_view(AppealView(0))
+    client.add_view(AppealView())
     client.add_view(AppealReviewView())
     asyncio.create_task(unmute_loop())
 
@@ -697,7 +713,7 @@ async def run_mod_command(message, name, args):
     embed.add_field(name="Reason", value=clip(reason), inline=False)
     embed.add_field(name="Want to be unbanned?", value="Click **Appeal** below and explain why you should be unbanned.", inline=False)
     embed.set_footer(text=f"Server ID: {guild.id}")
-    sent = await dm_user(user, embed, AppealView(guild.id))
+    sent = await dm_user(user, embed, AppealView())
     try:
         await guild.ban(user, reason=f"{message.author}: {reason}")
     except discord.Forbidden:
