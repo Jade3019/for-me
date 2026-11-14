@@ -440,7 +440,6 @@ def fmt_seconds(sec):
 
 
 async def dm_user(user, embed, view=None):
-    """Deprecated: DMs don't work for users outside shared servers"""
     try:
         await user.send(embed=embed, view=view)
         return True
@@ -933,31 +932,41 @@ async def run_mod_command(message, name, args):
         except Exception as e:
             pass
     
+    dm_embed = discord.Embed(title=f"A moderator is banning you from {guild.name}",
+                             color=discord.Color.red())
+    dm_embed.add_field(name="Reason", value=clip(reason), inline=False)
+    dm_embed.add_field(
+        name="Appeal",
+        value=(f"If the ban succeeds, DM this bot to appeal. "
+               f"For this server, use `{PREFIX}appeal {guild.id} <reason>`."),
+        inline=False,
+    )
+    dm_embed.set_footer(text=f"Server ID: {guild.id}")
+    sent = await dm_user(user, dm_embed)
+
     try:
         await guild.ban(user, reason=f"{message.author}: {reason}")
     except discord.Forbidden:
-        await message.channel.send("❌ I can't ban that user. Move my role above theirs and give me Ban Members.")
+        await message.channel.send(
+            "❌ I can't ban that user. Move my role above theirs and give me Ban Members."
+            + (" The user was notified that a ban was attempted." if sent else "")
+        )
+        return
+    except discord.HTTPException:
+        await message.channel.send(
+            "❌ The ban failed. Please try again."
+            + (" The user was notified that a ban was attempted." if sent else "")
+        )
         return
     
     infractions["bans"].append({**base, "reason": reason})
     save_infractions()
     
-    if is_hacked:
-        await message.channel.send(f"✅ Banned <@{uid}> and deleted {deleted_count} messages.")
-    else:
-        await message.channel.send(f"✅ Banned <@{uid}>.")
-    
-    # Send DM to banned user if possible
-    try:
-        dm_embed = discord.Embed(title=f"You have been banned from {guild.name}", color=discord.Color.red())
-        dm_embed.add_field(name="Reason", value=clip(reason), inline=False)
-        dm_embed.add_field(name="Appeal", 
-                          value=f"DM this bot to appeal. Include your server ID, or send your appeal directly if you're banned in only one server.",
-                          inline=False)
-        dm_embed.set_footer(text=f"Server ID: {guild.id}")
-        await user.send(embed=dm_embed)
-    except (discord.Forbidden, discord.HTTPException):
-        pass
+    result = (f"✅ Banned <@{uid}> and deleted {deleted_count} messages."
+              if is_hacked else f"✅ Banned <@{uid}>.")
+    if not sent:
+        result += " ⚠️ I couldn't DM them the appeal instructions."
+    await message.channel.send(result)
     
     embed = discord.Embed(title=f"User banned", color=discord.Color.red())
     embed.add_field(name="User", value=f"{user} (ID: {uid})", inline=False)
