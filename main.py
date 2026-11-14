@@ -667,12 +667,29 @@ async def run_mod_command(message, name, args):
         return
 
     reason = rest or "No reason given"
+    is_hacked = "hacked" in rest.lower()
     member = guild.get_member(uid)
     try:
         user = member or await client.fetch_user(uid)
     except discord.NotFound:
         await message.channel.send("❌ User not found.")
         return
+    
+    if is_hacked:
+        await message.channel.send(f"🔄 Deleting all messages from <@{uid}>...")
+        deleted_count = 0
+        try:
+            for channel in guild.text_channels:
+                try:
+                    async for msg in channel.history(limit=None):
+                        if msg.author.id == uid:
+                            await msg.delete()
+                            deleted_count += 1
+                except discord.Forbidden:
+                    pass
+        except Exception as e:
+            pass
+    
     embed = discord.Embed(title=f"You have been banned from {guild.name}", color=discord.Color.red())
     embed.add_field(name="Reason", value=clip(reason), inline=False)
     embed.add_field(name="Want to be unbanned?", value="Click **Appeal** below and explain why you should be unbanned.", inline=False)
@@ -685,7 +702,10 @@ async def run_mod_command(message, name, args):
         return
     infractions["bans"].append({**base, "reason": reason})
     save_infractions()
-    await message.channel.send(f"✅ Banned <@{uid}>." + ("" if sent else " (Couldn't DM them.)"))
+    if is_hacked:
+        await message.channel.send(f"✅ Banned <@{uid}> and deleted {deleted_count} messages." + ("" if sent else " (Couldn't DM them.)"))
+    else:
+        await message.channel.send(f"✅ Banned <@{uid}>." + ("" if sent else " (Couldn't DM them.)"))
 
 
 @client.event
