@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import re
-import aiohttp
 
 import discord
 
@@ -458,50 +457,13 @@ def fmt_seconds(sec):
     return " ".join(parts) or "0s"
 
 
-async def send_dm_via_api(user_id, content):
-    """Send a DM via Discord API, bypassing shared server requirement"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://discord.com/api/v10/users/{user_id}/channels"
-            headers = {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
-            data = {"recipient_id": user_id}
-            
-            async with session.post(url, json=data, headers=headers) as resp:
-                if resp.status != 201:
-                    print(f"DEBUG: Failed to create DM channel: {resp.status}")
-                    return False
-                dm_channel = await resp.json()
-                channel_id = dm_channel["id"]
-            
-            message_url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-            async with session.post(message_url, json=content, headers=headers) as resp:
-                if resp.status != 200:
-                    print(f"DEBUG: Failed to send message: {resp.status}")
-                    return False
-                return True
-    except Exception as e:
-        print(f"DEBUG: Error sending DM via API: {e}")
-        return False
-
-
 async def dm_user(user, embed, view=None):
-    """Send DM to user, falls back to API if user doesn't share server"""
+    """Deprecated: DMs don't work for users outside shared servers"""
     try:
         await user.send(embed=embed, view=view)
         return True
     except (discord.Forbidden, discord.HTTPException):
-        # Fall back to API method if user doesn't share server
-        embed_json = {
-            "title": embed.title,
-            "description": embed.description,
-            "color": embed.color.value if embed.color else 0,
-            "fields": [{"name": f.name, "value": f.value, "inline": f.inline} for f in embed.fields],
-        }
-        if embed.footer:
-            embed_json["footer"] = {"text": embed.footer.text}
-        
-        content = {"embeds": [embed_json]}
-        return await send_dm_via_api(user.id, content)
+        return False
 
 
 class AppealModal(discord.ui.Modal, title="Ban appeal"):
@@ -855,24 +817,28 @@ async def run_mod_command(message, name, args):
         except Exception as e:
             pass
     
-    embed = discord.Embed(title=f"You have been banned from {guild.name}", color=discord.Color.red())
-    embed.add_field(name="Reason", value=clip(reason), inline=False)
-    embed.add_field(name="Want to appeal?", 
-                    value=f"Send this message in DMs to the bot:\n`{PREFIX}appeal {guild.id} <your reason>`\n\nExample: `{PREFIX}appeal {guild.id} I wasn't hacking`", 
-                    inline=False)
-    embed.set_footer(text=f"Server ID: {guild.id}")
-    sent = await dm_user(user, embed)
     try:
         await guild.ban(user, reason=f"{message.author}: {reason}")
     except discord.Forbidden:
         await message.channel.send("❌ I can't ban that user. Move my role above theirs and give me Ban Members.")
         return
+    
     infractions["bans"].append({**base, "reason": reason})
     save_infractions()
+    
     if is_hacked:
-        await message.channel.send(f"✅ Banned <@{uid}> and deleted {deleted_count} messages." + ("" if sent else " (Couldn't DM them.)"))
+        await message.channel.send(f"✅ Banned <@{uid}> and deleted {deleted_count} messages.")
     else:
-        await message.channel.send(f"✅ Banned <@{uid}>." + ("" if sent else " (Couldn't DM them.)"))
+        await message.channel.send(f"✅ Banned <@{uid}>.")
+    
+    embed = discord.Embed(title=f"User banned", color=discord.Color.red())
+    embed.add_field(name="User", value=f"{user} (ID: {uid})", inline=False)
+    embed.add_field(name="Reason", value=clip(reason), inline=False)
+    embed.add_field(name="Appeal command", 
+                    value=f"`{PREFIX}appeal {guild.id} <reason>`", 
+                    inline=False)
+    embed.set_footer(text=f"Server ID: {guild.id}")
+    await send_log(guild.id, "server", embed)
 
 
 @client.event
