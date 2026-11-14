@@ -16,6 +16,16 @@ modmail_channel_id = os.getenv("modmail_channel_id", "").strip()
 if not modmail_channel_id.isdigit() or int(modmail_channel_id) <= 0:
     raise RuntimeError("Set modmail_channel_id to the staff modmail channel ID in .env.")
 
+role_ids_value = os.getenv("role_ids", "").strip()
+try:
+    ROLE_IDS = tuple(dict.fromkeys(
+        int(role_id.strip()) for role_id in role_ids_value.split(",") if role_id.strip()
+    ))
+except ValueError as error:
+    raise RuntimeError("Set role_ids to a comma-separated list of Discord role IDs in .env.") from error
+if not ROLE_IDS or any(role_id <= 0 for role_id in ROLE_IDS):
+    raise RuntimeError("Set role_ids to a comma-separated list of Discord role IDs in .env.")
+
 PREFIX = "s!"
 STICKY_FILE = "stickies.json"
 LOG_FILE = "logchannels.json"
@@ -578,9 +588,15 @@ async def handle_appeal_dm(message):
     )
     try:
         starter = await channel.send(
+            content=" ".join(f"<@&{role_id}>" for role_id in ROLE_IDS),
             embed=embed,
             view=AppealReviewView(),
-            allowed_mentions=discord.AllowedMentions.none(),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False,
+                users=False,
+                roles=[discord.Object(id=role_id) for role_id in ROLE_IDS],
+                replied_user=False,
+            ),
         )
         thread = await starter.create_thread(name=f"Appeal - {user_name} ({message.author.id})"[:100])
     except (discord.Forbidden, discord.HTTPException):

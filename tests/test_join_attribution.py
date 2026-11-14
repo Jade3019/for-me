@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "modmail_channel_id": "456"}), \
+with patch.dict(os.environ, {
+    "DISCORD_TOKEN": "test-token",
+    "modmail_channel_id": "456",
+    "role_ids": "111,222",
+}), \
         patch.object(discord.Client, "run"):
     main = importlib.import_module("main")
 

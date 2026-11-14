@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-with patch.dict(os.environ, {"DISCORD_TOKEN": "test-token", "modmail_channel_id": "456"}), \
+with patch.dict(os.environ, {
+    "DISCORD_TOKEN": "test-token",
+    "modmail_channel_id": "456",
+    "role_ids": "111,222",
+}), \
         patch.object(discord.Client, "run"):
     main = importlib.import_module("main")
 
@@ -56,6 +60,12 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
 
         self.guild.fetch_ban.assert_awaited_once()
         intro = self.thread.send.await_args.args[0]
+        staff_notice = self.modmail_channel.send.await_args.kwargs
+        self.assertEqual(staff_notice["content"], "<@&111> <@&222>")
+        self.assertEqual(
+            [role.id for role in staff_notice["allowed_mentions"].roles],
+            [111, 222],
+        )
         self.assertIn("New modmail from **Global User** (`789`).", intro)
         self.assertIn("`//` for an internal note that is NOT sent", intro)
         self.assertIn("`!close` to close this.", intro)

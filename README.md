@@ -7,9 +7,10 @@ Set the bot token and the staff-only modmail channel ID in `.env`:
 ```env
 DISCORD_TOKEN=your-discord-bot-token
 modmail_channel_id=123456789012345678
+role_ids=1530963363155279923,1531477075347636355,1532820561833496876,1532820446599319736
 ```
 
-The bot needs permission to view and send messages in that channel, create threads, and send messages in threads. Banned users can DM the bot their appeal directly. If they are banned from multiple servers, they should include the server ID; staff can reply in the created thread, use `//` for notes that are not forwarded, and `!close` to close the conversation.
+`role_ids` is a comma-separated list of roles to ping when an appeal arrives. The bot needs permission to view and send messages in the modmail channel, create threads, send messages in threads, and mention those roles (or the roles must be mentionable). Banned users can DM the bot their appeal directly. If they are banned from multiple servers, they should include the server ID; staff can reply in the created thread, use `//` for notes that are not forwarded, and `!close` to close the conversation.
 
 ## Join website attribution
 
