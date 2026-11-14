@@ -16,12 +16,13 @@ INVITE_SOURCE_FILE = "invitesources.json"
 INFRACTION_FILE = "infractions.json"
 MUTE_ROLE_ID = 1558947443444555958
 APPEAL_CHANNEL_ID = 1568339091702026300
-LOG_COMMANDS = {"memberlog": "member", "automodlog": "automod", "messagelog": "message"}
+LOG_COMMANDS = {"memberlog": "member", "automodlog": "automod", "messagelog": "message", "serverlog": "server"}
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True  # also enable "Server Members Intent" in the Developer Portal
 intents.auto_moderation_execution = True  # also enable "Message Content Intent" in the Developer Portal
+intents.guilds = True  # for channel and role events
 client = discord.Client(intents=intents)
 
 # channel_id -> {"text": str, "last_id": int | None}
@@ -779,6 +780,134 @@ async def on_raw_message_edit(payload):
     embed.add_field(name="After", value=clip(after.content), inline=False)
     embed.set_footer(text=f"Author ID: {after.author.id} | Message ID: {after.id}")
     await send_log(payload.guild_id, "message", embed, after.embeds)
+
+
+@client.event
+async def on_guild_channel_create(channel):
+    embed = discord.Embed(
+        title="Channel created",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Name", value=channel.mention)
+    embed.add_field(name="Type", value=channel.type.name.replace("_", " ").title())
+    embed.set_footer(text=f"Channel ID: {channel.id}")
+    await send_log(channel.guild.id, "server", embed)
+
+
+@client.event
+async def on_guild_channel_delete(channel):
+    embed = discord.Embed(
+        title="Channel deleted",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Name", value=channel.name)
+    embed.add_field(name="Type", value=channel.type.name.replace("_", " ").title())
+    embed.set_footer(text=f"Channel ID: {channel.id}")
+    await send_log(channel.guild.id, "server", embed)
+
+
+@client.event
+async def on_guild_channel_update(before, after):
+    if before.name != after.name:
+        embed = discord.Embed(
+            title="Channel renamed",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Before", value=before.name)
+        embed.add_field(name="After", value=after.mention)
+        embed.set_footer(text=f"Channel ID: {after.id}")
+        await send_log(after.guild.id, "server", embed)
+    elif before.topic != after.topic:
+        embed = discord.Embed(
+            title="Channel topic updated",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Channel", value=after.mention)
+        embed.add_field(name="Before", value=clip(before.topic or "*(no topic)*"), inline=False)
+        embed.add_field(name="After", value=clip(after.topic or "*(no topic)*"), inline=False)
+        embed.set_footer(text=f"Channel ID: {after.id}")
+        await send_log(after.guild.id, "server", embed)
+
+
+@client.event
+async def on_member_update(before, after):
+    if before.roles != after.roles:
+        added_roles = [r for r in after.roles if r not in before.roles]
+        removed_roles = [r for r in before.roles if r not in after.roles]
+        
+        if added_roles:
+            embed = discord.Embed(
+                title="Role(s) added",
+                color=discord.Color.green(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Member", value=f"{after.mention} ({after})")
+            embed.add_field(
+                name="Roles added",
+                value="\n".join(r.mention for r in added_roles),
+                inline=False
+            )
+            embed.set_footer(text=f"User ID: {after.id}")
+            await send_log(after.guild.id, "server", embed)
+        
+        if removed_roles:
+            embed = discord.Embed(
+                title="Role(s) removed",
+                color=discord.Color.orange(),
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="Member", value=f"{after.mention} ({after})")
+            embed.add_field(
+                name="Roles removed",
+                value="\n".join(r.mention for r in removed_roles),
+                inline=False
+            )
+            embed.set_footer(text=f"User ID: {after.id}")
+            await send_log(after.guild.id, "server", embed)
+
+
+@client.event
+async def on_guild_role_create(role):
+    embed = discord.Embed(
+        title="Role created",
+        color=discord.Color.green(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Role", value=role.mention)
+    embed.add_field(name="Color", value=str(role.color))
+    embed.set_footer(text=f"Role ID: {role.id}")
+    await send_log(role.guild.id, "server", embed)
+
+
+@client.event
+async def on_guild_role_delete(role):
+    embed = discord.Embed(
+        title="Role deleted",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Role", value=role.name)
+    embed.add_field(name="Color", value=str(role.color))
+    embed.set_footer(text=f"Role ID: {role.id}")
+    await send_log(role.guild.id, "server", embed)
+
+
+@client.event
+async def on_guild_role_update(before, after):
+    if before.name != after.name:
+        embed = discord.Embed(
+            title="Role renamed",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="Before", value=before.name)
+        embed.add_field(name="After", value=after.mention)
+        embed.set_footer(text=f"Role ID: {after.id}")
+        await send_log(after.guild.id, "server", embed)
 
 
 client.run(token)
