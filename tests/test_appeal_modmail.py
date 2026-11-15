@@ -73,7 +73,7 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("`!close` to close this.", intro)
         self.thread.send.assert_awaited_once()
         self.assertEqual(main.appeals[654]["status"], "open")
-        save.assert_called_once()
+        self.assertEqual(save.call_count, 2)
 
     async def test_user_reply_is_forwarded_to_existing_thread(self):
         main.appeals[654] = {
@@ -270,7 +270,7 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
             self.user.send.assert_awaited_once()
             self.assertEqual(main.appeals[654]["history"][0]["direction"], "staff")
 
-    async def test_failed_staff_dm_is_reported_and_not_recorded(self):
+    async def test_failed_staff_dm_is_reported_and_recorded(self):
         ticket = {"thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"}
         message = SimpleNamespace(
             id=1002, content="Staff response", channel=self.thread, attachments=[],
@@ -279,10 +279,148 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
         self.user.send.side_effect = discord.Forbidden(
             SimpleNamespace(status=403, reason="Forbidden"), "DMs closed"
         )
-        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)):
+        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)), \
+                patch.object(main, "save_appeals"):
             await main.handle_appeal_staff_message(message, ticket)
         self.assertIn("couldn't DM", self.thread.send.await_args.args[0])
-        self.assertNotIn("history", ticket)
+        self.assertEqual(ticket["history"][0]["delivery_status"], "failed")
+
+    async def test_50278_retains_conversation_and_survives_restart(self):
+        error = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50278, "message": "Cannot send messages to this user"},
+        )
+        self.message.guild = None
+        self.user.send.side_effect = error
+        staff_message = SimpleNamespace(
+            id=1002, content="We are reviewing your appeal.", channel=self.thread, attachments=[],
+            author=SimpleNamespace(id=42, guild_permissions=SimpleNamespace(ban_members=True))
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "appeals.json")
+            with patch.object(main, "APPEALS_FILE", path), \
+                    patch.object(main.client, "_connection") as connection, \
+                    patch.object(main.client, "get_guild", return_value=self.guild), \
+                    patch.object(main.client, "get_channel", return_value=self.modmail_channel), \
+                    patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)):
+                connection.user = SimpleNamespace(id=999)
+                await main.on_message(self.message)
+                ticket = main.appeals[654]
+                self.assertEqual(ticket["ban_reason"], "spam")
+                self.assertEqual(ticket["appeal_id"], "654")
+                self.assertTrue(ticket["created_at"])
+                with self.assertLogs(main.logger, level="WARNING") as logs:
+                    await main.handle_appeal_staff_message(staff_message, ticket)
+                self.assertIn("50278", logs.output[0])
+                self.assertIn("50278", self.thread.send.await_args.args[0])
+                self.assertEqual(ticket["history"][1]["delivery_status"], "failed")
+                self.assertEqual(ticket["history"][1]["delivery_error"]["code"], 50278)
+                self.user.send.side_effect = None
+                self.message.id = 1003
+                self.message.content = "One more message"
+                with patch.object(main.client, "get_channel", return_value=self.thread):
+                    await main.on_message(self.message)
+                    main.appeals.clear()
+                    main.load_appeals()
+                    self.message.id = 1004
+                    self.message.content = "After restart"
+                    await main.on_message(self.message)
+                self.assertEqual(main.appeals[654]["status"], "open")
+                self.assertEqual([entry["content"] for entry in main.appeals[654]["history"]],
+                                 ["I believe this ban was a mistake.",
+                                  "We are reviewing your appeal.", "One more message", "After restart"])
+
+    async def test_claim_unassign_and_closed_reply(self):
+        ticket = {"thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"}
+        message = SimpleNamespace(
+            id=1002, content="!claim", channel=self.thread, attachments=[],
+            author=SimpleNamespace(id=42, guild_permissions=SimpleNamespace(ban_members=True))
+        )
+        with patch.object(main, "save_appeals"), \
+                patch.object(main.client, "fetch_user", AsyncMock()) as fetch:
+            await main.handle_appeal_staff_message(message, ticket)
+            self.assertEqual(ticket["assigned_moderator_id"], 42)
+            message.content = "!unassign"
+            await main.handle_appeal_staff_message(message, ticket)
+            self.assertIsNone(ticket["assigned_moderator_id"])
+            ticket["status"] = "closed"
+            message.content = "Hello"
+            await main.handle_appeal_staff_message(message, ticket)
+        self.assertIn("closed", self.thread.send.await_args.args[0])
+        fetch.assert_not_awaited()
+
+    async def test_deleted_user_dm_is_recorded_and_reported(self):
+        ticket = {
+            "thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open",
+            "history": [{"message_id": 1001, "direction": "user", "content": "original"}],
+        }
+        main.appeals[654] = ticket
+        payload = SimpleNamespace(guild_id=None, message_id=1001)
+        with patch.object(main, "save_appeals"), \
+                patch.object(main.client, "get_channel", return_value=self.thread):
+            await main.on_raw_message_delete(payload)
+            await main.on_raw_message_delete(payload)
+        self.assertIn("deleted_at", ticket["history"][0])
+        self.assertEqual(ticket["history"][0]["content"], "original")
+        self.thread.send.assert_awaited_once()
+
+    async def test_attachments_are_preserved_as_links(self):
+        ticket = {"thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"}
+        main.appeals[654] = ticket
+        self.message.content = "Evidence"
+        self.message.attachments = [SimpleNamespace(url="https://cdn.discord.test/file")]
+        with patch.object(main.client, "get_channel", return_value=self.thread), \
+                patch.object(main, "save_appeals"):
+            await main.handle_appeal_dm(self.message)
+        self.assertIn("https://cdn.discord.test/file", self.thread.send.await_args.args[0])
+        self.assertIn("https://cdn.discord.test/file", ticket["history"][0]["content"])
+
+    async def test_incoming_dm_is_recorded_if_acknowledgement_is_rejected(self):
+        error = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50278, "message": "Cannot send messages to this user"},
+        )
+        self.dm_channel.send.side_effect = error
+        self.message.guild = None
+        with patch.object(main.client, "_connection") as connection, \
+                patch.object(main.client, "get_guild", return_value=self.guild), \
+                patch.object(main.client, "get_channel", return_value=self.modmail_channel), \
+                patch.object(main, "save_appeals"), \
+                self.assertLogs(main.logger, level="WARNING") as logs:
+            connection.user = SimpleNamespace(id=999)
+            await main.on_message(self.message)
+        self.assertIn("50278", logs.output[0])
+        self.assertEqual(main.appeals[654]["status"], "open")
+        self.assertEqual(main.appeals[654]["history"][0]["delivery_status"], "sent")
+
+    def test_legacy_record_migrates_without_fabricating_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "appeals.json")
+            with open(path, "w") as appeals_file:
+                json.dump({"654": {
+                    "thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"
+                }}, appeals_file)
+            with patch.object(main, "APPEALS_FILE", path):
+                main.load_appeals()
+                with open(path) as appeals_file:
+                    ticket = json.load(appeals_file)["654"]
+        self.assertEqual(ticket["ban_reason"], "spam")
+        self.assertEqual(ticket["appeal_id"], "654")
+        self.assertIsNone(ticket["created_at"])
+        self.assertIsNone(ticket["assigned_moderator_id"])
+
+    async def test_outbound_attachment_url_and_formatting_are_retained(self):
+        ticket = {"thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"}
+        message = SimpleNamespace(
+            id=1002, content="**Evidence**\n  indented", channel=self.thread,
+            attachments=[SimpleNamespace(url="https://cdn.discord.test/file")],
+            author=SimpleNamespace(id=42, guild_permissions=SimpleNamespace(ban_members=True))
+        )
+        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)), \
+                patch.object(main, "save_appeals"):
+            await main.handle_appeal_staff_message(message, ticket)
+        self.assertIn("**Evidence**\n  indented\nhttps://cdn.discord.test/file",
+                      self.user.send.await_args.args[0])
 
 
 if __name__ == "__main__":

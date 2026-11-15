@@ -242,7 +242,10 @@ async def on_message(message):
         return
 
     if message.guild is None:
-        await handle_appeal_dm(message)
+        try:
+            await handle_appeal_dm(message)
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not process or respond to DM from user %s: %s", message.author.id, error)
         return
 
     if message.guild and message.content.startswith(PREFIX):
@@ -417,17 +420,33 @@ appeal_locks: dict[int, asyncio.Lock] = {}
 def load_appeals():
     if os.path.exists(APPEALS_FILE):
         with open(APPEALS_FILE) as f:
-            appeals.update({int(tid): record for tid, record in json.load(f).items()})
+            loaded = {int(tid): record for tid, record in json.load(f).items()}
         migrated = False
-        for ticket in appeals.values():
-            if "ban_id" in ticket:
-                continue
+        for thread_id, ticket in loaded.items():
             ban = next((record for record in reversed(infractions["bans"])
                         if record["guild_id"] == ticket["guild_id"]
-                        and record["user_id"] == ticket["user_id"]), None)
-            if ban:
+                        and record["user_id"] == ticket["user_id"]
+                        and ("ban_id" not in ticket or ban_record_id(record) == ticket["ban_id"])), None)
+            created_at = next((entry["timestamp"] for entry in ticket.get("history", [])
+                               if entry.get("timestamp")), None)
+            defaults = {
+                "appeal_id": str(thread_id),
+                "ban_reason": ban["reason"] if ban else None,
+                "created_at": created_at,
+                "last_activity_at": next((entry["timestamp"] for entry in reversed(ticket.get("history", []))
+                                          if entry.get("timestamp")), created_at),
+                "assigned_moderator_id": None,
+                "history": [],
+            }
+            if ban and "ban_id" not in ticket:
                 ticket["ban_id"] = ban_record_id(ban)
                 migrated = True
+            for key, value in defaults.items():
+                if key not in ticket:
+                    ticket[key] = value
+                    migrated = True
+        appeals.clear()
+        appeals.update(loaded)
         if migrated:
             save_appeals()
 
@@ -477,15 +496,40 @@ def message_already_recorded(ticket, message):
     )
 
 
-def record_appeal_message(ticket, message, direction, body):
-    ticket.setdefault("history", []).append({
+def record_appeal_message(ticket, message, direction, body, delivery_status="pending"):
+    timestamp = discord.utils.utcnow().isoformat()
+    entry = {
         "message_id": getattr(message, "id", None),
         "author_id": message.author.id,
         "direction": direction,
         "content": body,
-        "timestamp": discord.utils.utcnow().isoformat(),
-    })
+        "source_channel_id": getattr(message.channel, "id", None),
+        "timestamp": timestamp,
+        "delivery_status": delivery_status,
+    }
+    ticket.setdefault("history", []).append(entry)
+    ticket["last_activity_at"] = timestamp
     save_appeals()
+    return entry
+
+
+def update_delivery(entry, status, error=None):
+    entry["delivery_status"] = status
+    if error is not None:
+        entry["delivery_error"] = {
+            "type": type(error).__name__,
+            "status": getattr(error, "status", None),
+            "code": getattr(error, "code", None),
+            "message": str(error),
+        }
+    save_appeals()
+
+
+async def send_appeal_notice(destination, text):
+    try:
+        await destination.send(text)
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("Could not send appeal notice (%s): %s", type(error).__name__, error)
 
 
 async def send_appeal_text(destination, prefix, body):
@@ -531,12 +575,14 @@ def describe_dm_failure(error):
     if isinstance(error, discord.HTTPException):
         if error.code == 50007:
             return "Discord refused the DM (50007: Cannot send messages to this user)."
+        if error.code == 50278:
+            return "Discord refused the DM (50278: no eligible mutual server or DM access)."
         return f"Discord API request failed (HTTP {error.status}, error code {error.code}); check bot logs."
     return "The Discord API request failed due to a network error; check bot logs."
 
 
 def message_text(message):
-    parts = [message.content.strip()] if message.content and message.content.strip() else []
+    parts = [message.content] if message.content and message.content.strip() else []
     parts.extend(attachment.url for attachment in message.attachments)
     return "\n".join(parts)
 
@@ -548,7 +594,8 @@ def parse_appeal_request(content):
         tokens = text.split(maxsplit=1)
         if tokens and tokens[0].isdigit():
             return int(tokens[0]), tokens[1] if len(tokens) > 1 else ""
-    return None, text
+        return None, text
+    return None, content
 
 
 def open_appeals_for(user_id):
@@ -561,26 +608,33 @@ def open_appeals_for(user_id):
 async def forward_user_message(message, ticket, body=None):
     if message_already_recorded(ticket, message):
         return
+    body = body if body is not None else message_text(message)
+    if not body:
+        await send_appeal_notice(message.channel, "Please include a message or attachment with your appeal.")
+        return
+    entry = record_appeal_message(ticket, message, "user", body)
     thread = client.get_channel(ticket["thread_id"])
     if thread is None:
         try:
             thread = await client.fetch_channel(ticket["thread_id"])
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            await message.channel.send("❌ I couldn't find your open appeal thread. Please contact the server staff.")
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not fetch appeal thread %s (%s): %s",
+                           ticket["thread_id"], type(error).__name__, error)
+            update_delivery(entry, "failed", error)
+            await send_appeal_notice(message.channel, "❌ I couldn't find your open appeal thread. Please contact the server staff.")
             return
-    body = body if body is not None else message_text(message)
-    if not body:
-        await message.channel.send("Please include a message or attachment with your appeal.")
-        return
     try:
         await send_appeal_text(
             thread, f"**{getattr(message.author, 'global_name', None) or message.author.name}:**\n", body
         )
-    except (discord.Forbidden, discord.HTTPException):
-        await message.channel.send("❌ I couldn't deliver your message to the staff. Please try again later.")
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("Could not forward user message %s to appeal %s (%s): %s",
+                       message.id, ticket["thread_id"], type(error).__name__, error)
+        update_delivery(entry, "failed", error)
+        await send_appeal_notice(message.channel, "❌ I couldn't deliver your message to the staff. Please send it again later.")
         return
-    record_appeal_message(ticket, message, "user", body)
-    await message.channel.send("✅ Your message was sent to the staff team.")
+    update_delivery(entry, "sent")
+    await send_appeal_notice(message.channel, "✅ Your message was sent to the staff team.")
 
 
 async def handle_appeal_dm(message):
@@ -633,12 +687,14 @@ async def process_appeal_dm(message):
             await guild.fetch_ban(discord.Object(id=message.author.id))
         except discord.NotFound:
             continue
-        except discord.Forbidden:
+        except discord.Forbidden as error:
+            logger.warning("Could not verify ban for user %s in guild %s: %s", message.author.id, ban_guild_id, error)
             await message.channel.send(
                 f"❌ I can't verify your ban in {guild.name}. Please contact the server staff."
             )
             return
-        except discord.HTTPException:
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not verify ban for user %s in guild %s: %s", message.author.id, ban_guild_id, error)
             await message.channel.send(
                 f"❌ I couldn't verify your ban in {guild.name}. Please try again later."
             )
@@ -681,7 +737,8 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
     if channel is None:
         try:
             channel = await client.fetch_channel(MODMAIL_CHANNEL_ID)
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not fetch staff modmail channel %s: %s", MODMAIL_CHANNEL_ID, error)
             await reply_channel.send("❌ The modmail channel is unavailable. Please contact the server staff.")
             return
 
@@ -695,7 +752,8 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
     intro = (
         f"New modmail from **{user_name}** (`{user.id}`).\n"
         "Type here to reply (it is DMed to them). Start a message with `//` "
-        "for an internal note that is NOT sent. Use `!close` to close this.\n\n"
+        "for an internal note that is NOT sent. Use `!close` to close this. "
+        "Use `!claim` or `!unassign` to manage the assigned moderator.\n\n"
         f"**Appeal:**\n{appeal_text or 'Waiting for the user to reply.'}"
     )
     starter = None
@@ -712,20 +770,27 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
             ),
         )
         thread = await starter.create_thread(name=f"Appeal - {user_name} ({user.id})"[:100])
-    except (discord.Forbidden, discord.HTTPException):
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("Could not create appeal thread for user %s: %s", user.id, error)
         if starter is not None:
             try:
                 await starter.delete()
-            except discord.HTTPException:
-                print("Could not remove the failed appeal starter message.")
+            except discord.HTTPException as cleanup_error:
+                logger.warning("Could not remove failed appeal starter message: %s", cleanup_error)
         await reply_channel.send("❌ I couldn't create your modmail thread. Please contact the server staff.")
         return
 
+    created_at = discord.utils.utcnow().isoformat()
     appeals[thread.id] = {
+        "appeal_id": str(thread.id),
         "thread_id": thread.id,
         "user_id": user.id,
         "guild_id": guild.id,
         "ban_id": ban_id,
+        "ban_reason": ban_record["reason"],
+        "created_at": created_at,
+        "last_activity_at": created_at,
+        "assigned_moderator_id": None,
         "starter_id": getattr(starter, "id", thread.id),
         "status": "open",
         "history": [],
@@ -736,17 +801,24 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
             "author_id": user.id,
             "direction": "user",
             "content": appeal_text,
-            "timestamp": discord.utils.utcnow().isoformat(),
+            "timestamp": created_at,
+            "source_channel_id": getattr(message.channel, "id", None),
+            "delivery_status": "pending",
         })
     save_appeals()
     try:
         await send_appeal_text(thread, "", intro)
-    except (discord.Forbidden, discord.HTTPException):
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("Could not send opening message to appeal %s: %s", thread.id, error)
+        if message is not None:
+            update_delivery(appeals[thread.id]["history"][0], "failed", error)
         await reply_channel.send(
             "⚠️ Your appeal thread was created, but I couldn't add the opening message. "
             "Please resend your message so staff receive the full text."
         )
         return
+    if message is not None:
+        update_delivery(appeals[thread.id]["history"][0], "sent")
     await reply_channel.send("✅ Your appeal was sent to the staff team. Reply here to continue the conversation.")
 
 
@@ -756,25 +828,39 @@ async def handle_appeal_staff_message(message, ticket):
 
 
 async def process_appeal_staff_message(message, ticket):
-    if ticket["status"] != "open":
-        return
     if not message.author.guild_permissions.ban_members:
         await message.channel.send("❌ You need the Ban Members permission to manage this appeal.")
         return
+    if ticket["status"] != "open":
+        await message.channel.send("❌ This appeal is closed; your message was not sent.")
+        return
 
     text = message.content.strip()
+    if text.lower() in {"!claim", "!unassign"}:
+        ticket["assigned_moderator_id"] = message.author.id if text.lower() == "!claim" else None
+        ticket["last_activity_at"] = discord.utils.utcnow().isoformat()
+        save_appeals()
+        await message.channel.send(
+            f"✅ Assigned to <@{message.author.id}>." if text.lower() == "!claim"
+            else "✅ Moderator assignment cleared.",
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return
     if text.lower() in {"!close", PREFIX + "close"}:
         ticket["status"] = "closed"
+        ticket["last_activity_at"] = discord.utils.utcnow().isoformat()
         save_appeals()
         await message.channel.send("🔒 This modmail thread is closed.")
         try:
             user = await client.fetch_user(ticket["user_id"])
             await user.send("🔒 Your ban appeal conversation has been closed.")
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not notify user %s of closed appeal: %s", ticket["user_id"], error)
             await message.channel.send("⚠️ I couldn't notify the user that this appeal was closed.")
         try:
             await message.channel.edit(archived=True, locked=True)
-        except (discord.Forbidden, discord.HTTPException):
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not archive appeal thread %s: %s", ticket["thread_id"], error)
             await message.channel.send("⚠️ The thread could not be archived. Please archive it manually.")
         return
     if text.startswith("//"):
@@ -785,13 +871,17 @@ async def process_appeal_staff_message(message, ticket):
         return
     if message_already_recorded(ticket, message):
         return
+    entry = record_appeal_message(ticket, message, "staff", body)
     try:
         user = await client.fetch_user(ticket["user_id"])
         await send_appeal_text(user, "**Staff reply:**\n", body)
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-        await message.channel.send("❌ I couldn't DM the user. They may have DMs disabled.")
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("Could not deliver staff message %s to user %s (%s): %s",
+                       message.id, ticket["user_id"], type(error).__name__, error)
+        update_delivery(entry, "failed", error)
+        await message.channel.send(f"❌ I couldn't DM the user. {describe_dm_failure(error)}")
         return
-    record_appeal_message(ticket, message, "staff", body)
+    update_delivery(entry, "sent")
 
 
 class AppealStartView(discord.ui.View):
@@ -825,10 +915,12 @@ class AppealStartView(discord.ui.View):
             except discord.NotFound:
                 await interaction.followup.send("❌ This ban is no longer active.")
                 return
-            except discord.Forbidden:
+            except discord.Forbidden as error:
+                logger.warning("Could not verify appeal button ban for user %s: %s", interaction.user.id, error)
                 await interaction.followup.send("❌ I can't verify this ban. Please contact the server staff.")
                 return
-            except discord.HTTPException:
+            except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+                logger.warning("Could not verify appeal button ban for user %s: %s", interaction.user.id, error)
                 await interaction.followup.send("❌ I couldn't verify this ban. Please try again later.")
                 return
             await create_appeal(interaction.user, interaction.followup, guild, ban)
@@ -908,6 +1000,7 @@ class AppealReviewView(discord.ui.View):
         result = "approved" if approved else "declined"
         ticket["status"] = result
         ticket["reviewer_id"] = interaction.user.id
+        ticket["last_activity_at"] = discord.utils.utcnow().isoformat()
         save_appeals()
         dm = discord.Embed(title=f"Appeal {result}",
                            color=discord.Color.green() if approved else discord.Color.red(),
@@ -1244,6 +1337,27 @@ async def on_automod_action(execution):
 @client.event
 async def on_raw_message_delete(payload):
     if not payload.guild_id:
+        for ticket in list(appeals.values()):
+            async with appeal_lock(ticket["user_id"]):
+                entry = next((entry for entry in ticket.get("history", [])
+                              if entry.get("direction") == "user"
+                              and entry.get("message_id") == payload.message_id), None)
+                if entry is None or entry.get("deleted_at"):
+                    continue
+                entry["deleted_at"] = discord.utils.utcnow().isoformat()
+                ticket["last_activity_at"] = entry["deleted_at"]
+                save_appeals()
+                thread = client.get_channel(ticket["thread_id"])
+                try:
+                    if thread is None:
+                        thread = await client.fetch_channel(ticket["thread_id"])
+                    await send_appeal_text(
+                        thread, "", f"ℹ️ The user deleted their DM (message ID: `{payload.message_id}`)."
+                    )
+                except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+                    logger.warning("Could not report deleted DM %s to appeal %s: %s",
+                                   payload.message_id, ticket["thread_id"], error)
+                break
         return
     msg = payload.cached_message
     if msg is None or msg.author.bot:
