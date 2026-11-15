@@ -66,6 +66,10 @@ class BanNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("spam", embed.fields[0].value)
         self.assertIn("DM this bot", embed.fields[1].value)
         self.assertIn(str(self.guild.id), embed.fields[1].value)
+        install = next(field for field in embed.fields if field.name == "Add the app to your account")
+        self.assertIn("https://discord.com/oauth2/authorize?client_id=1568321176034615327", install.value)
+        self.assertIn("Add to my apps", install.value)
+        self.assertIn("may still restrict DMs", install.value)
         view = self.dm_channel.send.await_args.kwargs["view"]
         self.assertEqual(view.children[0].label, "Appeal Ban")
         self.assertIn("Ban ID:", embed.footer.text)

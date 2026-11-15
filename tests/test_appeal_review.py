@@ -57,6 +57,9 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
         self.interaction.guild.unban.assert_awaited_once()
         self.assertEqual(dm.await_args.args[1].title, "Appeal approved")
         self.assertIn("Test server", dm.await_args.args[1].description)
+        self.assertIn("PC:", dm.await_args.args[1].fields[0].value)
+        self.assertIn("Mobile:", dm.await_args.args[1].fields[0].value)
+        self.assertIn("Deauthorize", dm.await_args.args[1].fields[0].value)
         self.interaction.response.defer.assert_awaited_once()
         self.interaction.followup.send.assert_not_awaited()
         self.assertTrue(all(c.disabled for c in self.interaction.edit_original_response.await_args.kwargs["view"].children))
@@ -67,6 +70,8 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
         dm = await self.run_review(False)
         self.interaction.guild.unban.assert_not_awaited()
         self.assertEqual(dm.await_args.args[1].title, "Appeal declined")
+        self.assertIn("PC:", dm.await_args.args[1].fields[0].value)
+        self.assertIn("Mobile:", dm.await_args.args[1].fields[0].value)
         self.assertEqual(main.appeals[777]["status"], "declined")
         self.interaction.edit_original_response.assert_awaited_once()
 

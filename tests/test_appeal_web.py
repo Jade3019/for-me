@@ -171,6 +171,9 @@ class AppealWebsiteTests(unittest.IsolatedAsyncioTestCase):
         self.guild.unban.assert_awaited_once()
         _, body = await self.csrf()
         self.assertIn("Status: approved", body)
+        self.assertIn("PC:", body)
+        self.assertIn("Mobile:", body)
+        self.assertIn("Deauthorize", body)
 
     async def test_discord_and_staff_creation_failures_are_reported(self):
         await self.sign_in()

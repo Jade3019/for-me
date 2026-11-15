@@ -34,6 +34,12 @@ if not ROLE_IDS or any(role_id <= 0 for role_id in ROLE_IDS):
     raise RuntimeError("Set role_ids to a comma-separated list of Discord role IDs in .env.")
 
 PREFIX = "s!"
+APPEAL_APP_INSTALL_URL = "https://discord.com/oauth2/authorize?client_id=1568321176034615327"
+APPEAL_APP_REMOVAL = (
+    "After your appeal, you can remove the app from your Discord account:\n\n"
+    "PC: Open User Settings (gear) → Authorized Apps → select the app → Deauthorize.\n"
+    "Mobile: Tap your profile → Settings (gear) → Authorized Apps → select the app → Deauthorize."
+)
 STICKY_FILE = "stickies.json"
 LOG_FILE = "logchannels.json"
 INVITE_SOURCE_FILE = "invitesources.json"
@@ -1034,6 +1040,7 @@ class AppealReviewView(discord.ui.View):
         dm = discord.Embed(title=f"Appeal {result}",
                            color=discord.Color.green() if approved else discord.Color.red(),
                            description=f"Your ban appeal for {guild_name} has been {result}.")
+        dm.add_field(name="Remove the app (optional)", value=APPEAL_APP_REMOVAL, inline=False)
         sent = True if ticket.get("source") == "website" else await dm_user(user, dm)
         embed = old.copy()
         embed.color = discord.Color.green() if approved else discord.Color.red()
@@ -1264,6 +1271,13 @@ async def run_mod_command(message, name, args):
         name="Appeal",
         value=(f"If the ban succeeds, click Appeal Ban or DM this bot to appeal. "
                f"For this server, use `{PREFIX}appeal {guild.id} <reason>`."),
+        inline=False,
+    )
+    dm_embed.add_field(
+        name="Add the app to your account",
+        value=(f"[Add the bot to your apps]({APPEAL_APP_INSTALL_URL}) and choose **Add to my apps**. "
+               "Then return here and click **Appeal Ban** or DM the bot. "
+               "Discord may still restrict DMs even after installing the app."),
         inline=False,
     )
     if APPEAL_WEB_CONFIG:

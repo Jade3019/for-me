@@ -177,6 +177,8 @@ class AppealWebsite:
             body += f"<p>Ban reason: {html.escape(ban['reason'])}</p>"
             if ticket:
                 body += f"<p>Status: {html.escape(ticket['status'])}</p>"
+                if ticket["status"] in ("approved", "declined"):
+                    body += f"<pre>{html.escape(self.bot.APPEAL_APP_REMOVAL)}</pre>"
                 for entry in ticket.get("history", []):
                     if entry.get("direction") in ("user", "staff"):
                         body += (f"<p><strong>{html.escape(entry['direction'].title())}:</strong></p>"
