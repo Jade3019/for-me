@@ -178,6 +178,13 @@ class AppealWebsite:
             if ticket:
                 body += f"<p>Status: {html.escape(ticket['status'])}</p>"
                 if ticket["status"] in ("approved", "declined"):
+                    if ticket["status"] == "approved":
+                        invite = ticket.get("invite_url")
+                        if invite:
+                            body += (f"<p>Server invite (single use; expires 7 days after creation): "
+                                     f"<a href='{html.escape(invite, quote=True)}'>{html.escape(invite)}</a></p>")
+                        else:
+                            body += "<p>No invite is available. Please contact staff.</p>"
                     body += f"<pre>{html.escape(self.bot.APPEAL_APP_REMOVAL)}</pre>"
                 for entry in ticket.get("history", []):
                     if entry.get("direction") in ("user", "staff"):

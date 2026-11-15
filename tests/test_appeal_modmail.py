@@ -46,6 +46,7 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
             name="Test server",
             fetch_ban=AsyncMock(),
         )
+        self.modmail_channel.guild = self.guild
         self.message = SimpleNamespace(
             id=1001,
             content="I believe this ban was a mistake.",
@@ -135,6 +136,71 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
 
         self.dm_channel.send.assert_awaited_once()
         self.assertIn("123", self.dm_channel.send.await_args.args[0])
+        self.modmail_channel.send.assert_not_awaited()
+
+    async def test_unbanned_user_can_open_reply_close_and_reopen_support(self):
+        main.infractions["bans"] = []
+        self.message.content = "I need help from a moderator."
+        staff = SimpleNamespace(
+            id=1002, content="How can we help?", channel=self.thread, attachments=[],
+            author=SimpleNamespace(id=42, guild_permissions=SimpleNamespace(ban_members=True)),
+        )
+        with patch.object(main.client, "get_channel", side_effect=lambda cid:
+                          self.thread if cid == 654 else self.modmail_channel), \
+                patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)), \
+                patch.object(main, "save_appeals"):
+            await main.handle_appeal_dm(self.message)
+            ticket = main.appeals[654]
+            self.assertEqual(ticket["kind"], "support")
+            self.assertIsNone(self.modmail_channel.send.await_args.kwargs["view"])
+            self.assertIsNone(main.appeal_for_ban(789, 123, "some-ban"))
+            await main.handle_appeal_staff_message(staff, ticket)
+            self.assertIn("How can we help?", self.user.send.await_args.args[0])
+            self.message.id = 1003
+            self.message.content = "More details"
+            await main.handle_appeal_dm(self.message)
+            self.assertIn("More details", self.thread.send.await_args.args[0])
+            staff.content = "!close"
+            await main.handle_appeal_staff_message(staff, ticket)
+            self.assertIn("modmail", self.user.send.await_args.args[0])
+            self.message.id = 1004
+            await main.handle_appeal_dm(self.message)
+        self.assertEqual(self.modmail_channel.send.await_count, 2)
+
+    async def test_inactive_record_opens_support_not_appeal(self):
+        self.guild.fetch_ban.side_effect = discord.NotFound(
+            SimpleNamespace(status=404, reason="Not found"), "Not banned"
+        )
+        with patch.object(main.client, "get_guild", return_value=self.guild), \
+                patch.object(main.client, "get_channel", return_value=self.modmail_channel), \
+                patch.object(main, "save_appeals"):
+            await main.handle_appeal_dm(self.message)
+        self.assertEqual(main.appeals[654]["kind"], "support")
+
+    async def test_support_history_survives_restart_and_duplicate_dm(self):
+        main.infractions["bans"] = []
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "appeals.json")
+            with patch.object(main, "APPEALS_FILE", path), \
+                    patch.object(main.client, "get_channel", side_effect=lambda cid:
+                                 self.thread if cid == 654 else self.modmail_channel):
+                await asyncio.gather(main.handle_appeal_dm(self.message), main.handle_appeal_dm(self.message))
+                main.appeals.clear()
+                main.load_appeals()
+                await main.handle_appeal_dm(self.message)
+        self.modmail_channel.send.assert_awaited_once()
+        self.thread.send.assert_awaited_once()
+        self.assertEqual(main.appeals[654]["kind"], "support")
+        self.assertEqual(len(main.appeals[654]["history"]), 1)
+
+    async def test_ban_verification_failure_does_not_open_support(self):
+        self.guild.fetch_ban.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing permissions"
+        )
+        with patch.object(main.client, "get_guild", return_value=self.guild), \
+                self.assertLogs(main.logger, level="WARNING"):
+            await main.handle_appeal_dm(self.message)
+        self.assertIn("can't verify", self.dm_channel.send.await_args.args[0])
         self.modmail_channel.send.assert_not_awaited()
 
     def test_open_thread_records_persist(self):

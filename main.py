@@ -459,7 +459,7 @@ def load_appeals():
                 "assigned_moderator_id": None,
                 "history": [],
             }
-            if ban and "ban_id" not in ticket:
+            if ban and "ban_id" not in ticket and ticket.get("kind") != "support":
                 ticket["ban_id"] = ban_record_id(ban)
                 migrated = True
             for key, value in defaults.items():
@@ -504,7 +504,8 @@ def appeal_lock(user_id):
 def appeal_for_ban(user_id, guild_id, ban_id):
     return next((
         ticket for ticket in appeals.values()
-        if ticket["user_id"] == user_id and ticket["guild_id"] == guild_id
+        if ticket.get("kind") != "support"
+        and ticket["user_id"] == user_id and ticket["guild_id"] == guild_id
         and (ticket.get("ban_id") == ban_id or
              ("ban_id" not in ticket and ticket["status"] == "open"))
     ), None)
@@ -684,7 +685,7 @@ async def process_appeal_dm(message):
 
     if not appeal_text:
         await message.channel.send(
-            f"Send your appeal in a DM to open a thread. If you are banned in multiple servers, "
+            f"Send a message in a DM to contact staff. If you are banned in multiple servers, "
             f"use `{PREFIX}appeal <server_id> <reason>`."
         )
         return
@@ -695,15 +696,12 @@ async def process_appeal_dm(message):
             guild_id is None or record["guild_id"] == guild_id
         ):
             bans.setdefault(record["guild_id"], record)
-    if not bans:
-        await message.channel.send("❌ I couldn't find a ban record for you. Please contact the server staff.")
-        return
-
     active_bans = []
     for ban_guild_id, record in bans.items():
         guild = client.get_guild(ban_guild_id)
         if guild is None:
-            continue
+            await message.channel.send("❌ A server with your ban record is unavailable. Please try again later.")
+            return
         try:
             await guild.fetch_ban(discord.Object(id=message.author.id))
         except discord.NotFound:
@@ -723,7 +721,19 @@ async def process_appeal_dm(message):
         active_bans.append((guild, record))
 
     if not active_bans:
-        await message.channel.send("❌ I couldn't find an active ban for you in a server I support.")
+        channel = client.get_channel(MODMAIL_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await client.fetch_channel(MODMAIL_CHANNEL_ID)
+            except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+                logger.warning("Could not fetch staff modmail channel %s: %s", MODMAIL_CHANNEL_ID, error)
+                await message.channel.send("❌ The modmail channel is unavailable. Please contact the server staff.")
+                return
+        guild = channel.guild
+        if guild_id is not None and guild.id != guild_id:
+            await message.channel.send("❌ No active ban was found in that server, and support is not configured for it.")
+            return
+        await create_appeal(message.author, message.channel, guild, None, appeal_text, message)
         return
     if len(active_bans) > 1:
         servers = ", ".join(f"{guild.name} (`{guild.id}`)" for guild, _ in active_bans)
@@ -738,16 +748,18 @@ async def process_appeal_dm(message):
 
 
 async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", message=None, *, source="dm"):
-    ban_id = ban_record_id(ban_record)
+    is_support = ban_record is None
+    ban_id = ban_record_id(ban_record) if ban_record is not None else None
     open_ticket = next((ticket for _, ticket in open_appeals_for(user.id)
                         if ticket["guild_id"] == guild.id), None)
-    if open_ticket and open_ticket.get("ban_id") not in (None, ban_id):
+    if open_ticket and (is_support or open_ticket.get("kind") == "support"
+                        or open_ticket.get("ban_id") not in (None, ban_id)):
         await reply_channel.send(
-            "You already have an open appeal for an earlier ban in this server. "
-            "Ask staff to close it before appealing the new ban."
+            "You already have an open modmail thread in this server. "
+            "Ask staff to close it before opening another."
         )
         return
-    existing = appeal_for_ban(user.id, guild.id, ban_id)
+    existing = appeal_for_ban(user.id, guild.id, ban_id) if not is_support else None
     if existing:
         if existing["status"] == "open":
             await reply_channel.send("You already have an open appeal for this ban. Reply here to continue.")
@@ -764,11 +776,13 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
             return
 
     user_name = getattr(user, "global_name", None) or user.name
-    embed = discord.Embed(title="Ban appeal", color=discord.Color.gold(),
+    label = "Support" if is_support else "Appeal"
+    embed = discord.Embed(title="Mod support" if is_support else "Ban appeal", color=discord.Color.gold(),
                           timestamp=discord.utils.utcnow())
     embed.add_field(name="Server", value=f"{guild.name} (`{guild.id}`)", inline=False)
-    embed.add_field(name="Ban reason", value=clip(ban_record["reason"]), inline=False)
-    embed.add_field(name="Appeal", value=clip(appeal_text or "Waiting for the user's message."), inline=False)
+    if ban_record is not None:
+        embed.add_field(name="Ban reason", value=clip(ban_record["reason"]), inline=False)
+    embed.add_field(name=label, value=clip(appeal_text or "Waiting for the user's message."), inline=False)
     embed.set_footer(text=f"User ID: {user.id} | Guild ID: {guild.id}")
     reply_instructions = (
         "Type here to reply (the user can read it on the appeal website). "
@@ -779,14 +793,14 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
         f"{reply_instructions}Start a message with `//` "
         "for an internal note that is NOT sent. Use `!close` to close this. "
         "Use `!claim` or `!unassign` to manage the assigned moderator.\n\n"
-        f"**Appeal:**\n{appeal_text or 'Waiting for the user to reply.'}"
+        f"**{label}:**\n{appeal_text or 'Waiting for the user to reply.'}"
     )
     starter = None
     try:
         starter = await channel.send(
             content=" ".join(f"<@&{role_id}>" for role_id in ROLE_IDS),
             embed=embed,
-            view=AppealReviewView(),
+            view=None if is_support else AppealReviewView(),
             allowed_mentions=discord.AllowedMentions(
                 everyone=False,
                 users=False,
@@ -794,7 +808,7 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
                 replied_user=False,
             ),
         )
-        thread = await starter.create_thread(name=f"Appeal - {user_name} ({user.id})"[:100])
+        thread = await starter.create_thread(name=f"{label} - {user_name} ({user.id})"[:100])
     except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
         logger.warning("Could not create appeal thread for user %s: %s", user.id, error)
         if starter is not None:
@@ -811,8 +825,9 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
         "thread_id": thread.id,
         "user_id": user.id,
         "guild_id": guild.id,
+        "kind": "support" if is_support else "appeal",
         "ban_id": ban_id,
-        "ban_reason": ban_record["reason"],
+        "ban_reason": ban_record["reason"] if ban_record is not None else None,
         "created_at": created_at,
         "last_activity_at": created_at,
         "assigned_moderator_id": None,
@@ -839,7 +854,7 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
         if message is not None:
             update_delivery(appeals[thread.id]["history"][0], "failed", error)
         await reply_channel.send(
-            "⚠️ Your appeal thread was created, but I couldn't add the opening message. "
+            "⚠️ Your modmail thread was created, but I couldn't add the opening message. "
             "Please resend your message so staff receive the full text."
         )
         return
@@ -848,7 +863,7 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
     if source == "website":
         await reply_channel.send("✅ Your appeal was sent to the staff team. Return here to check for replies.")
     else:
-        await reply_channel.send("✅ Your appeal was sent to the staff team. Reply here to continue the conversation.")
+        await reply_channel.send("✅ Your message was sent to the staff team. Reply here to continue the conversation.")
 
 
 async def handle_appeal_staff_message(message, ticket):
@@ -858,10 +873,10 @@ async def handle_appeal_staff_message(message, ticket):
 
 async def process_appeal_staff_message(message, ticket):
     if not message.author.guild_permissions.ban_members:
-        await message.channel.send("❌ You need the Ban Members permission to manage this appeal.")
+        await message.channel.send("❌ You need the Ban Members permission to manage this modmail.")
         return
     if ticket["status"] != "open":
-        await message.channel.send("❌ This appeal is closed; your message was not sent.")
+        await message.channel.send("❌ This modmail is closed; your message was not sent.")
         return
 
     text = message.content.strip()
@@ -883,7 +898,7 @@ async def process_appeal_staff_message(message, ticket):
         if ticket.get("source") != "website":
             try:
                 user = await client.fetch_user(ticket["user_id"])
-                await user.send("🔒 Your ban appeal conversation has been closed.")
+                await user.send("🔒 Your modmail conversation has been closed.")
             except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
                 logger.warning("Could not notify user %s of closed appeal: %s", ticket["user_id"], error)
                 await message.channel.send("⚠️ I couldn't notify the user that this appeal was closed.")
@@ -994,6 +1009,7 @@ class AppealReviewView(discord.ui.View):
         tickets = [
             (thread_id, ticket) for thread_id, ticket in open_appeals_for(uid)
             if ticket["guild_id"] == guild_id
+            and ticket.get("kind") != "support"
             and ("starter_id" not in ticket or ticket["starter_id"] == interaction.message.id)
         ]
         if len(tickets) != 1:
@@ -1032,14 +1048,35 @@ class AppealReviewView(discord.ui.View):
                 await interaction.followup.send("❌ Couldn't unban that user. Please try again.", ephemeral=True)
                 return
         
+        invite_url = None
+        if approved:
+            for channel in guild.text_channels:
+                if not channel.permissions_for(guild.me).create_instant_invite:
+                    continue
+                try:
+                    invite = await channel.create_invite(
+                        max_age=7 * 24 * 60 * 60, max_uses=1, unique=True,
+                        reason=f"Appeal approved for user {uid}",
+                    )
+                    invite_url = invite.url
+                    break
+                except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+                    logger.warning("Could not create appeal invite in channel %s: %s", channel.id, error)
+
         result = "approved" if approved else "declined"
         ticket["status"] = result
+        if invite_url:
+            ticket["invite_url"] = invite_url
         ticket["reviewer_id"] = interaction.user.id
         ticket["last_activity_at"] = discord.utils.utcnow().isoformat()
         save_appeals()
         dm = discord.Embed(title=f"Appeal {result}",
                            color=discord.Color.green() if approved else discord.Color.red(),
                            description=f"Your ban appeal for {guild_name} has been {result}.")
+        if invite_url:
+            dm.add_field(name="Server invite", value=f"{invite_url}\nSingle use; expires in 7 days.", inline=False)
+        elif approved:
+            dm.add_field(name="Server invite", value="An invite could not be created. Please contact staff.", inline=False)
         dm.add_field(name="Remove the app (optional)", value=APPEAL_APP_REMOVAL, inline=False)
         sent = True if ticket.get("source") == "website" else await dm_user(user, dm)
         embed = old.copy()
@@ -1068,6 +1105,12 @@ class AppealReviewView(discord.ui.View):
         if not sent:
             await interaction.followup.send(
                 f"⚠️ Appeal {result}, but I couldn't DM the user.", ephemeral=True
+            )
+        if approved and not invite_url:
+            logger.warning("Could not create an appeal invite for user %s in guild %s", uid, guild_id)
+            await interaction.followup.send(
+                "⚠️ The user was unbanned, but I couldn't create an invite. Check Create Invite permissions and send one manually.",
+                ephemeral=True,
             )
 
     @discord.ui.button(label="Approved", style=discord.ButtonStyle.success, custom_id="appeal_approve")

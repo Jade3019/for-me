@@ -39,6 +39,13 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
             followup=SimpleNamespace(send=AsyncMock()),
             edit_original_response=AsyncMock(),
         )
+        self.invite_channel = SimpleNamespace(
+            id=100,
+            permissions_for=lambda member: SimpleNamespace(create_instant_invite=True),
+            create_invite=AsyncMock(return_value=SimpleNamespace(url="https://discord.gg/example")),
+        )
+        self.interaction.guild.me = SimpleNamespace()
+        self.interaction.guild.text_channels = [self.invite_channel]
         self.user = SimpleNamespace(send=AsyncMock())
         self.thread = SimpleNamespace(edit=AsyncMock())
         self.view = main.AppealReviewView()
@@ -55,11 +62,17 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_approval_unbans_and_notifies(self):
         dm = await self.run_review(True)
         self.interaction.guild.unban.assert_awaited_once()
+        self.invite_channel.create_invite.assert_awaited_once_with(
+            max_age=604800, max_uses=1, unique=True,
+            reason="Appeal approved for user 123456789012345678",
+        )
         self.assertEqual(dm.await_args.args[1].title, "Appeal approved")
         self.assertIn("Test server", dm.await_args.args[1].description)
-        self.assertIn("PC:", dm.await_args.args[1].fields[0].value)
-        self.assertIn("Mobile:", dm.await_args.args[1].fields[0].value)
-        self.assertIn("Deauthorize", dm.await_args.args[1].fields[0].value)
+        self.assertIn("https://discord.gg/example", dm.await_args.args[1].fields[0].value)
+        self.assertIn("PC:", dm.await_args.args[1].fields[1].value)
+        self.assertIn("Mobile:", dm.await_args.args[1].fields[1].value)
+        self.assertIn("Deauthorize", dm.await_args.args[1].fields[1].value)
+        self.assertEqual(main.appeals[777]["invite_url"], "https://discord.gg/example")
         self.interaction.response.defer.assert_awaited_once()
         self.interaction.followup.send.assert_not_awaited()
         self.assertTrue(all(c.disabled for c in self.interaction.edit_original_response.await_args.kwargs["view"].children))
@@ -69,11 +82,29 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_decline_notifies_without_unbanning(self):
         dm = await self.run_review(False)
         self.interaction.guild.unban.assert_not_awaited()
+        self.invite_channel.create_invite.assert_not_awaited()
         self.assertEqual(dm.await_args.args[1].title, "Appeal declined")
         self.assertIn("PC:", dm.await_args.args[1].fields[0].value)
         self.assertIn("Mobile:", dm.await_args.args[1].fields[0].value)
         self.assertEqual(main.appeals[777]["status"], "declined")
         self.interaction.edit_original_response.assert_awaited_once()
+
+    async def test_missing_invite_permission_warns_staff_and_user(self):
+        self.interaction.guild.text_channels = []
+        with self.assertLogs(main.logger, level="WARNING"):
+            dm = await self.run_review(True)
+        self.assertEqual(main.appeals[777]["status"], "approved")
+        self.assertIn("could not be created", dm.await_args.args[1].fields[0].value)
+        self.assertIn("couldn't create an invite", self.interaction.followup.send.await_args.args[0])
+
+    async def test_invite_creation_failure_warns_staff(self):
+        self.invite_channel.create_invite.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"), "Missing permissions"
+        )
+        with self.assertLogs(main.logger, level="WARNING"):
+            await self.run_review(True)
+        self.assertEqual(main.appeals[777]["status"], "approved")
+        self.assertIn("couldn't create an invite", self.interaction.followup.send.await_args.args[0])
 
     async def test_failed_dm_warns_staff_for_both_results(self):
         for approved in (True, False):

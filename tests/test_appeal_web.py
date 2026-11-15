@@ -155,6 +155,11 @@ class AppealWebsiteTests(unittest.IsolatedAsyncioTestCase):
             "csrf": csrf, "guild_id": "123", "message": "Please review"
         })
         self.guild.unban = AsyncMock()
+        self.guild.me = SimpleNamespace()
+        self.guild.text_channels = [SimpleNamespace(
+            permissions_for=lambda member: SimpleNamespace(create_instant_invite=True),
+            create_invite=AsyncMock(return_value=SimpleNamespace(url="https://discord.gg/example")),
+        )]
         embed = self.channel.send.await_args.kwargs["embed"]
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=42, mention="<@42>",
@@ -169,8 +174,11 @@ class AppealWebsiteTests(unittest.IsolatedAsyncioTestCase):
             await main.AppealReviewView().handle(interaction, True)
         dm.assert_not_awaited()
         self.guild.unban.assert_awaited_once()
+        main.appeals.clear()
+        main.load_appeals()
         _, body = await self.csrf()
         self.assertIn("Status: approved", body)
+        self.assertIn("https://discord.gg/example", body)
         self.assertIn("PC:", body)
         self.assertIn("Mobile:", body)
         self.assertIn("Deauthorize", body)
