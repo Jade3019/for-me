@@ -90,6 +90,31 @@ class AppealModmailTests(unittest.IsolatedAsyncioTestCase):
         self.thread.send.assert_awaited_once()
         self.assertIn("More context", self.thread.send.await_args.args[0])
 
+    async def test_on_message_routes_banned_user_dm_without_guild_membership(self):
+        main.appeals[654] = {
+            "thread_id": 654, "user_id": 789, "guild_id": 123, "status": "open"
+        }
+        self.message.guild = None
+        self.message.content = "I am still banned, please review this."
+        with patch.object(main.client, "_connection") as connection, \
+                patch.object(main.client, "get_channel", return_value=self.thread), \
+                patch.object(main, "save_appeals"):
+            connection.user = SimpleNamespace(id=999)
+            await main.on_message(self.message)
+        self.thread.send.assert_awaited_once()
+        self.assertIn(self.message.content, self.thread.send.await_args.args[0])
+
+    async def test_on_message_opens_appeal_for_banned_nonmember(self):
+        self.message.guild = None
+        with patch.object(main.client, "_connection") as connection, \
+                patch.object(main.client, "get_guild", return_value=self.guild), \
+                patch.object(main.client, "get_channel", return_value=self.modmail_channel), \
+                patch.object(main, "save_appeals"):
+            connection.user = SimpleNamespace(id=999)
+            await main.on_message(self.message)
+        self.assertEqual(self.guild.fetch_ban.await_args.args[0].id, self.user.id)
+        self.assertEqual(main.appeals[654]["user_id"], self.user.id)
+
     async def test_multiple_active_bans_require_a_server_id(self):
         main.infractions["bans"].append({
             "guild_id": 321,

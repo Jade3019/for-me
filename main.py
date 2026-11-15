@@ -1,14 +1,17 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import tempfile
 import uuid
 
+import aiohttp
 import discord
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 
 token = os.getenv("DISCORD_TOKEN")
 if not token:
@@ -510,12 +513,26 @@ def fmt_seconds(sec):
     return " ".join(parts) or "0s"
 
 
-async def dm_user(user, embed, view=None):
+async def send_dm(user, embed, view=None):
     try:
-        await user.send(embed=embed, view=view)
-        return True
-    except (discord.Forbidden, discord.HTTPException):
-        return False
+        channel = await user.create_dm()
+        await channel.send(embed=embed, view=view)
+    except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+        logger.warning("DM delivery to user %s failed (%s): %s", user.id, type(error).__name__, error)
+        return error
+    return None
+
+
+async def dm_user(user, embed, view=None):
+    return await send_dm(user, embed, view) is None
+
+
+def describe_dm_failure(error):
+    if isinstance(error, discord.HTTPException):
+        if error.code == 50007:
+            return "Discord refused the DM (50007: Cannot send messages to this user)."
+        return f"Discord API request failed (HTTP {error.status}, error code {error.code}); check bot logs."
+    return "The Discord API request failed due to a network error; check bot logs."
 
 
 def message_text(message):
@@ -1089,15 +1106,18 @@ async def run_mod_command(message, name, args):
     reason = rest or "No reason given"
     is_hacked = "hacked" in rest.lower()
     member = guild.get_member(uid)
-    try:
-        user = member or await client.fetch_user(uid)
-    except discord.NotFound:
-        await message.channel.send("❌ User not found.")
-        return
-    
     if member and message.author.top_role <= member.top_role:
         await message.channel.send("❌ You can't ban a member with a role equal to or higher than yours.")
         return
+
+    user = member
+    lookup_error = None
+    if user is None:
+        try:
+            user = await client.fetch_user(uid)
+        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+            logger.warning("Could not fetch user %s for ban DM (%s): %s", uid, type(error).__name__, error)
+            lookup_error = error
     
     if is_hacked:
         await message.channel.send(f"🔄 Deleting all messages from <@{uid}>...")
@@ -1125,10 +1145,14 @@ async def run_mod_command(message, name, args):
         inline=False,
     )
     dm_embed.set_footer(text=f"Server ID: {guild.id} | Ban ID: {ban_id}")
-    sent = await dm_user(user, dm_embed, view=AppealStartView())
+    dm_error = lookup_error if lookup_error is not None else await send_dm(
+        user, dm_embed, view=AppealStartView()
+    )
+    sent = dm_error is None
+    ban_target = user if user is not None else discord.Object(id=uid)
 
     try:
-        await guild.ban(user, reason=f"{message.author}: {reason}")
+        await guild.ban(ban_target, reason=f"{message.author}: {reason}")
     except discord.Forbidden:
         await message.channel.send(
             "❌ I can't ban that user. Move my role above theirs and give me Ban Members."
@@ -1147,12 +1171,16 @@ async def run_mod_command(message, name, args):
     
     result = (f"✅ Banned <@{uid}> and deleted {deleted_count} messages."
               if is_hacked else f"✅ Banned <@{uid}>.")
-    if not sent:
-        result += " ⚠️ I couldn't DM them the appeal instructions."
+    if dm_error is not None:
+        if lookup_error is not None:
+            result += " ⚠️ I couldn't fetch the user to send appeal instructions. "
+        else:
+            result += " ⚠️ I couldn't DM them the appeal instructions. "
+        result += describe_dm_failure(dm_error)
     await message.channel.send(result)
     
     embed = discord.Embed(title=f"User banned", color=discord.Color.red())
-    embed.add_field(name="User", value=f"{user} (ID: {uid})", inline=False)
+    embed.add_field(name="User", value=f"{ban_target} (ID: {uid})", inline=False)
     embed.add_field(name="Reason", value=clip(reason), inline=False)
     embed.add_field(name="Appeal instructions", 
                     value="The user can DM this bot to appeal.",

@@ -1,4 +1,5 @@
 import importlib
+import asyncio
 import os
 import unittest
 from types import SimpleNamespace
@@ -22,10 +23,17 @@ class BanNotificationTests(unittest.IsolatedAsyncioTestCase):
         async def send_dm(**kwargs):
             self.events.append(("dm", kwargs["embed"]))
 
+        async def create_dm():
+            self.events.append(("create_dm", self.user_id))
+            return self.dm_channel
+
         async def ban(user, *, reason):
             self.events.append(("ban", user))
 
-        self.user = SimpleNamespace(id=self.user_id, top_role=1, send=AsyncMock(side_effect=send_dm))
+        self.dm_channel = SimpleNamespace(send=AsyncMock(side_effect=send_dm))
+        self.user = SimpleNamespace(
+            id=self.user_id, top_role=1, create_dm=AsyncMock(side_effect=create_dm)
+        )
         self.guild = SimpleNamespace(
             id=123,
             name="Test server",
@@ -52,24 +60,70 @@ class BanNotificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_dm_is_sent_before_ban_with_appeal_instructions(self):
         await self.run_ban()
 
-        self.assertEqual([event[0] for event in self.events], ["dm", "ban"])
-        embed = self.events[0][1]
+        self.assertEqual([event[0] for event in self.events], ["create_dm", "dm", "ban"])
+        embed = self.events[1][1]
         self.assertIn("Test server", embed.title)
         self.assertIn("spam", embed.fields[0].value)
         self.assertIn("DM this bot", embed.fields[1].value)
         self.assertIn(str(self.guild.id), embed.fields[1].value)
-        view = self.user.send.await_args.kwargs["view"]
+        view = self.dm_channel.send.await_args.kwargs["view"]
         self.assertEqual(view.children[0].label, "Appeal Ban")
         self.assertIn("Ban ID:", embed.footer.text)
 
     async def test_failed_dm_does_not_prevent_ban_and_warns_staff(self):
-        self.user.send.side_effect = discord.Forbidden(
-            SimpleNamespace(status=403, reason="Forbidden"), "DMs closed"
+        self.dm_channel.send.side_effect = discord.Forbidden(
+            SimpleNamespace(status=403, reason="Forbidden"),
+            {"code": 50007, "message": "Cannot send messages to this user"},
         )
-        await self.run_ban()
+        with self.assertLogs(main.logger, level="WARNING") as logs:
+            await self.run_ban()
 
         self.guild.ban.assert_awaited_once()
         self.assertIn("couldn't DM", self.message.channel.send.await_args.args[0])
+        self.assertIn("50007", self.message.channel.send.await_args.args[0])
+        self.assertIn("Cannot send messages to this user", logs.output[0])
+        self.assertIn(str(self.user_id), logs.output[0])
+
+    async def test_other_discord_errors_are_logged_and_reported(self):
+        self.user.create_dm.side_effect = discord.HTTPException(
+            SimpleNamespace(status=400, reason="Bad Request"),
+            {"code": 50035, "message": "Invalid Form Body"},
+        )
+        with self.assertLogs(main.logger, level="WARNING") as logs:
+            await self.run_ban()
+        self.guild.ban.assert_awaited_once()
+        self.assertIn("50035", self.message.channel.send.await_args.args[0])
+        self.assertIn("Invalid Form Body", logs.output[0])
+        self.dm_channel.send.assert_not_awaited()
+
+    async def test_nonmember_is_fetched_and_sent_dm_before_ban(self):
+        self.guild.get_member = lambda uid: None
+        with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)) as fetch:
+            await self.run_ban()
+        fetch.assert_awaited_once_with(self.user_id)
+        self.assertEqual([event[0] for event in self.events], ["create_dm", "dm", "ban"])
+
+    async def test_fetch_failure_is_logged_and_does_not_prevent_ban(self):
+        self.guild.get_member = lambda uid: None
+        error = discord.HTTPException(
+            SimpleNamespace(status=503, reason="Unavailable"),
+            {"code": 0, "message": "Service unavailable"},
+        )
+        with patch.object(main.client, "fetch_user", AsyncMock(side_effect=error)), \
+                self.assertLogs(main.logger, level="WARNING") as logs:
+            await self.run_ban()
+        self.assertEqual(self.guild.ban.await_args.args[0].id, self.user_id)
+        self.assertIn("couldn't fetch", self.message.channel.send.await_args.args[0])
+        self.assertIn("HTTP 503", self.message.channel.send.await_args.args[0])
+        self.assertIn("Service unavailable", logs.output[0])
+
+    async def test_network_failure_does_not_prevent_ban(self):
+        self.dm_channel.send.side_effect = asyncio.TimeoutError()
+        with self.assertLogs(main.logger, level="WARNING") as logs:
+            await self.run_ban()
+        self.guild.ban.assert_awaited_once()
+        self.assertIn("network error", self.message.channel.send.await_args.args[0])
+        self.assertIn("TimeoutError", logs.output[0])
 
     async def test_failed_ban_notice_does_not_claim_ban_succeeded(self):
         self.guild.ban.side_effect = discord.Forbidden(
@@ -77,7 +131,7 @@ class BanNotificationTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.run_ban()
 
-        embed = self.user.send.await_args.kwargs["embed"]
+        embed = self.dm_channel.send.await_args.kwargs["embed"]
         self.assertIn("If the ban succeeds", embed.fields[1].value)
         self.assertIn("ban was attempted", self.message.channel.send.await_args.args[0])
 
