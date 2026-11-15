@@ -58,6 +58,9 @@ class BanNotificationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("spam", embed.fields[0].value)
         self.assertIn("DM this bot", embed.fields[1].value)
         self.assertIn(str(self.guild.id), embed.fields[1].value)
+        view = self.user.send.await_args.kwargs["view"]
+        self.assertEqual(view.children[0].label, "Appeal Ban")
+        self.assertIn("Ban ID:", embed.footer.text)
 
     async def test_failed_dm_does_not_prevent_ban_and_warns_staff(self):
         self.user.send.side_effect = discord.Forbidden(

@@ -17,25 +17,37 @@ with patch.dict(os.environ, {
 
 class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        main.appeals.clear()
+        main.infractions["bans"] = [{
+            "id": "a" * 32, "guild_id": 456, "user_id": 123456789012345678, "reason": "spam"
+        }]
+        main.appeals[777] = {
+            "thread_id": 777, "starter_id": 888, "user_id": 123456789012345678,
+            "guild_id": 456, "ban_id": "a" * 32, "status": "open",
+        }
         embed = discord.Embed(title="Ban appeal")
         embed.set_footer(text="User ID: 123456789012345678 | Guild ID: 456")
         self.interaction = SimpleNamespace(
             user=SimpleNamespace(
+                id=123,
                 guild_permissions=SimpleNamespace(ban_members=True),
                 mention="<@123>",
             ),
-            message=SimpleNamespace(embeds=[embed]),
+            message=SimpleNamespace(id=888, embeds=[embed]),
             guild=SimpleNamespace(name="Test server", unban=AsyncMock()),
             response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
             followup=SimpleNamespace(send=AsyncMock()),
             edit_original_response=AsyncMock(),
         )
         self.user = SimpleNamespace(send=AsyncMock())
+        self.thread = SimpleNamespace(edit=AsyncMock())
         self.view = main.AppealReviewView()
 
     async def run_review(self, approved, dm_succeeds=True):
         with patch.object(main.client, "fetch_user", AsyncMock(return_value=self.user)), \
                 patch.object(main.client, "get_guild", return_value=self.interaction.guild), \
+                patch.object(main.client, "get_channel", return_value=self.thread), \
+                patch.object(main, "save_appeals"), \
                 patch.object(main, "dm_user", AsyncMock(return_value=dm_succeeds)) as dm:
             await self.view.handle(self.interaction, approved)
         return dm
@@ -49,11 +61,13 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
         self.interaction.followup.send.assert_not_awaited()
         self.assertTrue(all(c.disabled for c in self.interaction.edit_original_response.await_args.kwargs["view"].children))
         self.assertTrue(all(not c.disabled for c in self.view.children))
+        self.assertEqual(main.appeals[777]["status"], "approved")
 
     async def test_decline_notifies_without_unbanning(self):
         dm = await self.run_review(False)
         self.interaction.guild.unban.assert_not_awaited()
         self.assertEqual(dm.await_args.args[1].title, "Appeal declined")
+        self.assertEqual(main.appeals[777]["status"], "declined")
         self.interaction.edit_original_response.assert_awaited_once()
 
     async def test_failed_dm_warns_staff_for_both_results(self):
@@ -70,6 +84,21 @@ class AppealReviewTests(unittest.IsolatedAsyncioTestCase):
         dm.assert_not_awaited()
         self.interaction.guild.unban.assert_not_awaited()
         self.interaction.response.send_message.assert_awaited_once()
+
+    async def test_old_appeal_cannot_unban_a_newer_ban(self):
+        main.infractions["bans"].append({
+            "id": "b" * 32, "guild_id": 456, "user_id": 123456789012345678, "reason": "new ban"
+        })
+        dm = await self.run_review(True)
+        self.interaction.guild.unban.assert_not_awaited()
+        dm.assert_not_awaited()
+        self.assertIn("older ban", self.interaction.followup.send.await_args.args[0])
+
+    async def test_closed_appeal_cannot_be_reviewed_again(self):
+        main.appeals[777]["status"] = "closed"
+        dm = await self.run_review(True)
+        self.interaction.guild.unban.assert_not_awaited()
+        dm.assert_not_awaited()
 
 
 if __name__ == "__main__":
