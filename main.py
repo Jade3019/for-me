@@ -3,12 +3,14 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import uuid
 
 import aiohttp
 import discord
 from dotenv import load_dotenv
+import appeal_web
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -40,6 +42,8 @@ APPEALS_FILE = "appeals.json"
 MUTE_ROLE_ID = 1558947443444555958
 MODMAIL_CHANNEL_ID = int(modmail_channel_id)
 LOG_COMMANDS = {"memberlog": "member", "automodlog": "automod", "messagelog": "message", "serverlog": "server"}
+APPEAL_WEB_CONFIG = appeal_web.configuration()
+appeal_web_runner = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -226,11 +230,15 @@ async def on_invite_delete(invite):
 
 @client.event
 async def on_ready():
+    global appeal_web_runner
     load_stickies()
     load_logs()
     load_invite_sources()
     load_infractions()
     load_appeals()
+    if APPEAL_WEB_CONFIG and appeal_web_runner is None:
+        appeal_web_runner = await appeal_web.start(sys.modules[__name__], APPEAL_WEB_CONFIG)
+        print(f"Appeal website listening on {APPEAL_WEB_CONFIG['host']}:{APPEAL_WEB_CONFIG['port']}")
     for g in client.guilds:
         await snapshot_invites(g)
     print(f"Logged in as {client.user}")
@@ -246,6 +254,13 @@ async def on_message(message):
             await handle_appeal_dm(message)
         except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
             logger.warning("Could not process or respond to DM from user %s: %s", message.author.id, error)
+        return
+
+    if message.content.lower().strip() == PREFIX + "appealform":
+        if APPEAL_WEB_CONFIG:
+            await message.channel.send(f"Ban appeal form: {APPEAL_WEB_CONFIG['url']}")
+        else:
+            await message.channel.send("The appeal website is not configured.")
         return
 
     if message.guild and message.content.startswith(PREFIX):
@@ -716,7 +731,7 @@ async def process_appeal_dm(message):
     await create_appeal(message.author, message.channel, guild, ban_record, appeal_text, message)
 
 
-async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", message=None):
+async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", message=None, *, source="dm"):
     ban_id = ban_record_id(ban_record)
     open_ticket = next((ticket for _, ticket in open_appeals_for(user.id)
                         if ticket["guild_id"] == guild.id), None)
@@ -749,9 +764,13 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
     embed.add_field(name="Ban reason", value=clip(ban_record["reason"]), inline=False)
     embed.add_field(name="Appeal", value=clip(appeal_text or "Waiting for the user's message."), inline=False)
     embed.set_footer(text=f"User ID: {user.id} | Guild ID: {guild.id}")
+    reply_instructions = (
+        "Type here to reply (the user can read it on the appeal website). "
+        if source == "website" else "Type here to reply (it is DMed to them). "
+    )
     intro = (
         f"New modmail from **{user_name}** (`{user.id}`).\n"
-        "Type here to reply (it is DMed to them). Start a message with `//` "
+        f"{reply_instructions}Start a message with `//` "
         "for an internal note that is NOT sent. Use `!close` to close this. "
         "Use `!claim` or `!unassign` to manage the assigned moderator.\n\n"
         f"**Appeal:**\n{appeal_text or 'Waiting for the user to reply.'}"
@@ -793,6 +812,7 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
         "assigned_moderator_id": None,
         "starter_id": getattr(starter, "id", thread.id),
         "status": "open",
+        "source": source,
         "history": [],
     }
     if message is not None:
@@ -819,7 +839,10 @@ async def create_appeal(user, reply_channel, guild, ban_record, appeal_text="", 
         return
     if message is not None:
         update_delivery(appeals[thread.id]["history"][0], "sent")
-    await reply_channel.send("✅ Your appeal was sent to the staff team. Reply here to continue the conversation.")
+    if source == "website":
+        await reply_channel.send("✅ Your appeal was sent to the staff team. Return here to check for replies.")
+    else:
+        await reply_channel.send("✅ Your appeal was sent to the staff team. Reply here to continue the conversation.")
 
 
 async def handle_appeal_staff_message(message, ticket):
@@ -851,12 +874,13 @@ async def process_appeal_staff_message(message, ticket):
         ticket["last_activity_at"] = discord.utils.utcnow().isoformat()
         save_appeals()
         await message.channel.send("🔒 This modmail thread is closed.")
-        try:
-            user = await client.fetch_user(ticket["user_id"])
-            await user.send("🔒 Your ban appeal conversation has been closed.")
-        except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
-            logger.warning("Could not notify user %s of closed appeal: %s", ticket["user_id"], error)
-            await message.channel.send("⚠️ I couldn't notify the user that this appeal was closed.")
+        if ticket.get("source") != "website":
+            try:
+                user = await client.fetch_user(ticket["user_id"])
+                await user.send("🔒 Your ban appeal conversation has been closed.")
+            except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
+                logger.warning("Could not notify user %s of closed appeal: %s", ticket["user_id"], error)
+                await message.channel.send("⚠️ I couldn't notify the user that this appeal was closed.")
         try:
             await message.channel.edit(archived=True, locked=True)
         except (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError) as error:
@@ -872,6 +896,9 @@ async def process_appeal_staff_message(message, ticket):
     if message_already_recorded(ticket, message):
         return
     entry = record_appeal_message(ticket, message, "staff", body)
+    if ticket.get("source") == "website":
+        update_delivery(entry, "website")
+        return
     try:
         user = await client.fetch_user(ticket["user_id"])
         await send_appeal_text(user, "**Staff reply:**\n", body)
@@ -887,6 +914,8 @@ async def process_appeal_staff_message(message, ticket):
 class AppealStartView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        if APPEAL_WEB_CONFIG:
+            self.add_item(discord.ui.Button(label="Appeal on website", url=APPEAL_WEB_CONFIG["url"]))
 
     @discord.ui.button(label="Appeal Ban", style=discord.ButtonStyle.primary, custom_id="appeal_start")
     async def start(self, interaction, button):
@@ -1005,7 +1034,7 @@ class AppealReviewView(discord.ui.View):
         dm = discord.Embed(title=f"Appeal {result}",
                            color=discord.Color.green() if approved else discord.Color.red(),
                            description=f"Your ban appeal for {guild_name} has been {result}.")
-        sent = await dm_user(user, dm)
+        sent = True if ticket.get("source") == "website" else await dm_user(user, dm)
         embed = old.copy()
         embed.color = discord.Color.green() if approved else discord.Color.red()
         embed.add_field(name="Result", value=f"{'Approved' if approved else 'Declined'} by {interaction.user.mention}", inline=False)
@@ -1237,6 +1266,8 @@ async def run_mod_command(message, name, args):
                f"For this server, use `{PREFIX}appeal {guild.id} <reason>`."),
         inline=False,
     )
+    if APPEAL_WEB_CONFIG:
+        dm_embed.add_field(name="Website appeal", value=APPEAL_WEB_CONFIG["url"], inline=False)
     dm_embed.set_footer(text=f"Server ID: {guild.id} | Ban ID: {ban_id}")
     dm_error = lookup_error if lookup_error is not None else await send_dm(
         user, dm_embed, view=AppealStartView()

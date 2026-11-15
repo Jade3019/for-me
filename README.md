@@ -2,6 +2,28 @@
 
 ## Ban appeals via modmail
 
+### Appeal website (recommended)
+
+The website lets a banned user submit an appeal and read staff replies or the decision without DMs. It requires a publicly reachable HTTPS address and a running bot. In the Discord Developer Portal, open your bot's application, copy its **Application ID** and **Client Secret**, and add this exact OAuth2 redirect:
+
+```text
+https://appeals.example.com/callback
+```
+
+Add these values to `.env`, replacing the example address with your actual HTTPS origin:
+
+```env
+APPEAL_PUBLIC_URL=https://appeals.example.com
+DISCORD_CLIENT_ID=your-discord-application-id
+DISCORD_CLIENT_SECRET=your-discord-client-secret
+APPEAL_HOST=127.0.0.1
+APPEAL_PORT=8080
+```
+
+Keep the client secret private. The bot serves the site on `127.0.0.1:8080` by default; configure an HTTPS reverse proxy for your domain to forward requests to that address. The public URL must be an origin with no path. `http://localhost:8080` is allowed for local testing only. Configure all three of `APPEAL_PUBLIC_URL`, `DISCORD_CLIENT_ID`, and `DISCORD_CLIENT_SECRET`, or leave all three unset to disable the website. Do not log OAuth callback query strings in your reverse proxy.
+
+Run the bot normally; the website starts with it. Share the public URL somewhere users can reach after a ban: `s!appealform` posts it in Discord, and ban DMs include a link when delivery is possible. The site uses Discord sign-in (`identify` only) to verify user IDs, checks the active ban, and sends the form to the existing staff channel. Staff review with the existing buttons, or reply in the thread. Users sign in again to see replies and outcomes; browser sessions expire after an hour or a bot restart. Website messages are stored in the same appeal history. The website only supports bans recorded by this bot.
+
 Set the bot token and the staff-only modmail channel ID in `.env`:
 
 ```env
