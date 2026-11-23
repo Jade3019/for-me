@@ -361,6 +361,7 @@ async def on_message(message):
             f"`{p}warn @user <reason>` - warn a user (requires Timeout Members)\n"
             f"`{p}mute @user <time> <reason>` - mute for a duration (e.g. `10m`, `2h`, `1d`, `1w`) (requires Timeout Members)\n"
             f"`{p}ban @user <reason>` - ban a user (they get an appeal button) (requires Ban Members)\n"
+            f"`{p}ban @user hacked` - ban a hacked user and delete all their messages (requires Ban Members)\n"
             f"`{p}unban <user id>` - unban a user (requires Ban Members)"))
         embed.add_field(name="📋 Infractions", inline=False, value=(
             f"`{p}warns <@user>` - view warnings for a user (requires Timeout Members)\n"
