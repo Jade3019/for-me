@@ -358,24 +358,30 @@ async def on_message(message):
         p = PREFIX
         embed = discord.Embed(title="📖 Commands", description=f"Prefix: `{p}`", color=discord.Color.blurple())
         embed.add_field(name="🛡️ Moderation", inline=False, value=(
-            f"`{p}warn @user <reason>` - warn a user\n"
-            f"`{p}mute @user <time> <reason>` - mute (e.g. `10m`, `2h`, `1d`, `1w`)\n"
-            f"`{p}ban @user <reason>` - ban a user (they get an appeal button)\n"
-            f"`{p}unban <user id>` - unban a user"))
+            f"`{p}warn @user <reason>` - warn a user (requires Timeout Members)\n"
+            f"`{p}mute @user <time> <reason>` - mute for a duration (e.g. `10m`, `2h`, `1d`, `1w`) (requires Timeout Members)\n"
+            f"`{p}ban @user <reason>` - ban a user (they get an appeal button) (requires Ban Members)\n"
+            f"`{p}unban <user id>` - unban a user (requires Ban Members)"))
         embed.add_field(name="📋 Infractions", inline=False, value=(
-            f"`{p}warns @user` - view warnings\n"
-            f"`{p}mutes @user` - view mutes\n"
-            f"`{p}bans @user` - view bans"))
+            f"`{p}warns <@user>` - view warnings for a user (requires Timeout Members)\n"
+            f"`{p}mutes <@user>` - view mutes for a user (requires Timeout Members)\n"
+            f"`{p}bans <@user>` - view bans for a user (requires Ban Members)"))
         embed.add_field(name="📝 Logging (Manage Server)", inline=False, value=(
-            "\n".join(f"`{p}{c} #channel` - set the {k} log channel" for c, k in LOG_COMMANDS.items())))
+            f"`{p}memberlog #channel` - set the member join/leave log\n"
+            f"`{p}automodlog #channel` - set the automod log\n"
+            f"`{p}messagelog #channel` - set the message edit/delete log\n"
+            f"`{p}serverlog #channel` - set the server events log"))
         embed.add_field(name="🔗 Invite attribution (Manage Server)", inline=False, value=(
             f"`{p}invitesource <invite-code-or-link> <website>` - label a unique invite for a website\n"
             f"`{p}invitesource <invite-code-or-link> remove` - remove a source label\n"
-            f"`{p}invitesources` - list source labels"))
+            f"`{p}invitesources` - list all source labels"))
         embed.add_field(name="📌 Utility", inline=False, value=(
-            f"`{p}sticky <message> #channel` - sticky message (Manage Messages)\n"
-            f"`{p}ping` - latency and bot status\n"
-            f"`{p}commands` - this list"))
+            f"`{p}sticky <message> #channel` - create a sticky message (requires Manage Messages)\n"
+            f"`{p}ping` - check bot latency and status\n"
+            f"`{p}appealform` - show the ban appeal form URL\n"
+            f"`{p}commands` - show this list"))
+        embed.add_field(name="🛑 Ban Appeals (via DM)", inline=False, value=(
+            f"`{p}appeal <server_id> <message>` - appeal a ban (DM the bot to use the button from the ban notice)"))
         await message.channel.send(embed=embed)
         return
 
